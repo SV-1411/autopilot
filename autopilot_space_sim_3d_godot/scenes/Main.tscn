@@ -1,0 +1,195 @@
+[gd_scene format=3 load_steps=6]
+
+[ext_resource type="Script" path="res://scripts/Main.gd" id=1]
+[ext_resource type="PackedScene" path="res://scenes/Ship.tscn" id=2]
+[ext_resource type="PackedScene" path="res://scenes/Asteroid.tscn" id=3]
+[ext_resource type="Script" path="res://scripts/OrbitCameraRig.gd" id=4]
+
+[sub_resource type="PlaneMesh" id=1]
+size = Vector2(200, 200)
+
+[sub_resource type="StandardMaterial3D" id=2]
+albedo_color = Color(0.1, 0.12, 0.16, 1)
+roughness = 1.0
+
+[sub_resource type="BoxShape3D" id=3]
+size = Vector3(200, 1, 200)
+
+[sub_resource type="SphereMesh" id=4]
+radius = 1.2
+
+[sub_resource type="StandardMaterial3D" id=5]
+shading_mode = 0
+albedo_color = Color(0.95, 0.85, 0.2, 1)
+emission_enabled = true
+emission = Color(0.95, 0.85, 0.2, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="StandardMaterial3D" id=6]
+shading_mode = 0
+albedo_color = Color(0.72, 0.35, 1, 1)
+emission_enabled = true
+emission = Color(0.72, 0.35, 1, 1)
+emission_energy_multiplier = 2.0
+
+[node name="Main" type="Node3D"]
+script = ExtResource(1)
+ship_scene = ExtResource(2)
+asteroid_scene = ExtResource(3)
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+mesh = SubResource(1)
+material_override = SubResource(2)
+
+[node name="StartMarker" type="MeshInstance3D" parent="."]
+mesh = SubResource(4)
+material_override = SubResource(5)
+
+[node name="GoalMarker" type="MeshInstance3D" parent="."]
+mesh = SubResource(4)
+material_override = SubResource(6)
+
+[node name="FloorBody" type="StaticBody3D" parent="."]
+
+[node name="FloorCollision" type="CollisionShape3D" parent="FloorBody"]
+shape = SubResource(3)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.707107, -0.408248, 0.57735, 0, 0.816497, 0.57735, -0.707107, -0.408248, 0.57735, 0, 0, 0)
+light_energy = 2.0
+
+[node name="CameraRig" type="Node3D" parent="."]
+script = ExtResource(4)
+pivot_path = NodePath("Pivot")
+camera_path = NodePath("Pivot/Camera3D")
+
+[node name="Pivot" type="Node3D" parent="CameraRig"]
+transform = Transform3D(1, 0, 0, 0, 0.984808, 0.173648, 0, -0.173648, 0.984808, 0, 10, 0)
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig/Pivot"]
+position = Vector3(0, 0, -70)
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Panel" type="PanelContainer" parent="UI"]
+anchors_preset = 0
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 12.0
+offset_top = 12.0
+offset_right = 420.0
+offset_bottom = 270.0
+
+[node name="VBox" type="VBoxContainer" parent="UI/Panel"]
+
+[node name="RunButton" type="Button" parent="UI/Panel/VBox"]
+text = "Go"
+
+[node name="AddAsteroidButton" type="Button" parent="UI/Panel/VBox"]
+text = "Add Asteroid (A)"
+
+[node name="ModeLabel" type="Label" parent="UI/Panel/VBox"]
+text = "Mode: EDIT"
+
+[node name="SelectedLabel" type="Label" parent="UI/Panel/VBox"]
+text = "Selected: none"
+
+[node name="MetricsLabel" type="Label" parent="UI/Panel/VBox"]
+text = "Metrics:\n- Path: n/a\n- ETA: n/a\n- Replans: 0\n- Planner: n/a"
+
+[node name="HintLabel" type="Label" parent="UI/Panel/VBox"]
+text = "LMB: select\nShift+LMB: set Goal\nCtrl+LMB: set Start"
+
+[node name="Inspector" type="PanelContainer" parent="UI"]
+anchors_preset = 0
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 12.0
+offset_top = 290.0
+offset_right = 420.0
+offset_bottom = 560.0
+
+[node name="InspectorVBox" type="VBoxContainer" parent="UI/Inspector"]
+
+[node name="InspectorTitle" type="Label" parent="UI/Inspector/InspectorVBox"]
+text = "Inspector"
+
+[node name="PosTitle" type="Label" parent="UI/Inspector/InspectorVBox"]
+text = "Position (m)"
+
+[node name="PosGrid" type="GridContainer" parent="UI/Inspector/InspectorVBox"]
+columns = 2
+
+[node name="PosXLabel" type="Label" parent="UI/Inspector/InspectorVBox/PosGrid"]
+text = "X"
+
+[node name="PosX" type="SpinBox" parent="UI/Inspector/InspectorVBox/PosGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 0.5
+
+[node name="PosYLabel" type="Label" parent="UI/Inspector/InspectorVBox/PosGrid"]
+text = "Y"
+
+[node name="PosY" type="SpinBox" parent="UI/Inspector/InspectorVBox/PosGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 0.5
+
+[node name="PosZLabel" type="Label" parent="UI/Inspector/InspectorVBox/PosGrid"]
+text = "Z"
+
+[node name="PosZ" type="SpinBox" parent="UI/Inspector/InspectorVBox/PosGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 0.5
+
+[node name="VelTitle" type="Label" parent="UI/Inspector/InspectorVBox"]
+text = "Velocity (m/s)"
+
+[node name="VelGrid" type="GridContainer" parent="UI/Inspector/InspectorVBox"]
+columns = 2
+
+[node name="VelXLabel" type="Label" parent="UI/Inspector/InspectorVBox/VelGrid"]
+text = "Vx"
+
+[node name="VelX" type="SpinBox" parent="UI/Inspector/InspectorVBox/VelGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 1.0
+
+[node name="VelYLabel" type="Label" parent="UI/Inspector/InspectorVBox/VelGrid"]
+text = "Vy"
+
+[node name="VelY" type="SpinBox" parent="UI/Inspector/InspectorVBox/VelGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 1.0
+
+[node name="VelZLabel" type="Label" parent="UI/Inspector/InspectorVBox/VelGrid"]
+text = "Vz"
+
+[node name="VelZ" type="SpinBox" parent="UI/Inspector/InspectorVBox/VelGrid"]
+min_value = -200.0
+max_value = 200.0
+step = 1.0
+
+[node name="MassTitle" type="Label" parent="UI/Inspector/InspectorVBox"]
+text = "Mass (kg)"
+
+[node name="Mass" type="SpinBox" parent="UI/Inspector/InspectorVBox"]
+min_value = 1.0
+max_value = 100000.0
+step = 10.0
+
+[node name="RadiusTitle" type="Label" parent="UI/Inspector/InspectorVBox"]
+text = "Radius (m)"
+
+[node name="Radius" type="SpinBox" parent="UI/Inspector/InspectorVBox"]
+min_value = 0.25
+max_value = 20.0
+step = 0.25
+
+[node name="ApplyButton" type="Button" parent="UI/Inspector/InspectorVBox"]
+text = "Apply to Selected"

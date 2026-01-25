@@ -1,0 +1,25 @@
+[gd_scene format=3 load_steps=5]
+
+[ext_resource type="Script" path="res://scripts/Ship.gd" id=1]
+
+[sub_resource type="CapsuleMesh" id=1]
+radius = 0.7
+mid_height = 2.0
+
+[sub_resource type="StandardMaterial3D" id=2]
+albedo_color = Color(0.13, 0.93, 0.47, 1)
+roughness = 0.4
+
+[sub_resource type="CapsuleShape3D" id=3]
+radius = 0.8
+height = 2.2
+
+[node name="Ship" type="Area3D"]
+script = ExtResource(1)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource(1)
+material_override = SubResource(2)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource(3)

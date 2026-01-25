@@ -1,0 +1,13 @@
+63f7b34db8d8cdea90c76aacccf841ec
+::res://::1769353423
+icon.svg::CompressedTexture2D::6078291402739627622::1769352244::1769353430::1::::<><><>0<>0<>575300e5f3ac0cc94ffdbc1e192ebf9b<>res://.godot/imported/icon.svg-218a8f2b3041327d8a5756f3a245f83b.ctex::
+::res://scenes/::1769352501
+Asteroid.tscn::PackedScene::-1::1769352599::0::1::::<><><>0<>0<><>::res://scripts/Asteroid.gd
+Main.tscn::PackedScene::-1::1769352385::0::1::::<><><>0<>0<><>::res://scripts/Main.gd<>res://scenes/Ship.tscn<>res://scenes/Asteroid.tscn
+Ship.tscn::PackedScene::-1::1769352606::0::1::::<><><>0<>0<><>::res://scripts/Ship.gd
+::res://scripts/::1769352542
+Asteroid.gd::GDScript::7213645156634668165::1769352628::0::1::::Asteroid<>Area3D<><>0<>0<><>::
+Main.gd::GDScript::5690712760776853113::1769352592::0::1::::<>Node3D<><>0<>0<><>::
+Ship.gd::GDScript::8043927319004749195::1769352635::0::1::::Ship<>Area3D<><>0<>0<><>::
+::res://scripts/planning/::1769352501
+VoxelAStar.gd::GDScript::6064460032743348924::1769352501::0::1::::VoxelAStar<>RefCounted<><>0<>0<><>::
