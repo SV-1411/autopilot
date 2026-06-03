@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# RL artifacts
+*.pt
+*.zip
+logs/
+runs/
+best_model/
+eval/
+
+# Simulation output
+trajectory_log.csv
+
+# Godot
+autopilot_space_sim_3d_godot/.godot/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

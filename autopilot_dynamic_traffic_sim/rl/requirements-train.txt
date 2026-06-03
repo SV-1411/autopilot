@@ -1,0 +1,10 @@
+# RL training dependencies (use in Colab / GPU box).
+# Installs the core sim deps too via the parent requirements file is not assumed;
+# this file is self-contained for a fresh Colab runtime.
+numpy
+gymnasium
+stable-baselines3[extra]
+torch
+tensorboard
+tqdm
+rich

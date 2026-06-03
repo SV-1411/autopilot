@@ -1,3 +1,3 @@
+# Core simulation (run locally)
 pygame
 numpy
-matplotlib

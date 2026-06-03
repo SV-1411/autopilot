@@ -8,10 +8,19 @@ from typing import List, Tuple
 import pygame
 
 from config import (
+    AGENT_COLOR,
+    AGENT_HEADING_COLOR,
     AGENT_RADIUS,
     BACKGROUND_COLOR,
+    CONTROLLER,
     CSV_EXPORT,
     CSV_FILENAME,
+    OBSTACLE_COLOR,
+    RL_GOAL_RADIUS,
+    RL_MODEL_PATH,
+    RL_OBSTACLE_COUNT,
+    RL_OBSTACLE_SPEED_MAX,
+    RL_OBSTACLE_SPEED_MIN,
     DENSE_MOVING_OBSTACLE_COUNT,
     DENSE_STATIC_FILL_PROB,
     DENSE_STATIC_MODE,
@@ -53,6 +62,7 @@ class Environment:
         self.agent = Agent(sx, sy)
 
         self.obstacles: List[MovingObstacle] = []
+        self.static_obstacles: List[Tuple[float, float, float]] = []  # (x, y, radius)
         self._blocked_snapshot: List[Tuple[int, int]] = []
 
         self._replan_timer = 0.0
@@ -75,11 +85,92 @@ class Environment:
                 header.extend([f"ox{i}", f"oy{i}", f"ovx{i}", f"ovy{i}", f"or{i}"])
             self._csv_writer.writerow(header)
 
-        self._build_static_scenario()
-        self._spawn_moving_obstacles(self._moving_obstacle_target_count())
-        self._plan_path()
+        self._rl_mode = CONTROLLER == "rl"
+        if self._rl_mode:
+            self._setup_rl()
+        else:
+            self._build_static_scenario()
+            self._add_static_obstacles()
+            self._spawn_moving_obstacles(self._moving_obstacle_target_count())
+            self._plan_path()
+
+    # ---------------------------------------------------------------- RL mode
+
+    def _setup_rl(self) -> None:
+        """Run a trained policy end-to-end, reusing the training env dynamics."""
+        from rl.env import AutopilotGymEnv
+        from core.controllers import RLController
+
+        self._gym = AutopilotGymEnv(
+            width=SCREEN_WIDTH,
+            height=SCREEN_HEIGHT,
+            n_obstacles=RL_OBSTACLE_COUNT,
+            obstacle_speed_min=RL_OBSTACLE_SPEED_MIN,
+            obstacle_speed_max=RL_OBSTACLE_SPEED_MAX,
+            goal_radius=RL_GOAL_RADIUS,
+        )
+        self._rl = RLController(
+            RL_MODEL_PATH, SCREEN_WIDTH, SCREEN_HEIGHT,
+            self.agent._limits, RL_OBSTACLE_COUNT,
+        )
+        self._gym_obs, _ = self._gym.reset()
+        self._rl_accum = 0.0
+        self._rl_episodes = 0
+        self._rl_goals = 0
+        self._rl_collisions = 0
+
+        if not pygame.font.get_init():
+            pygame.font.init()
+        self._font = pygame.font.SysFont(None, 22)
+
+    def _update_rl(self, dt: float) -> None:
+        # Step at the policy's native timestep so playback is real-time.
+        self._rl_accum += dt
+        guard = 0
+        while self._rl_accum >= self._gym.dt and guard < 10:
+            guard += 1
+            self._rl_accum -= self._gym.dt
+            action, _ = self._rl.model.predict(self._gym_obs, deterministic=True)
+            self._gym_obs, _, terminated, truncated, info = self._gym.step(action)
+            if terminated or truncated:
+                reason = info.get("terminal_reason")
+                self._rl_episodes += 1
+                if reason == "goal":
+                    self._rl_goals += 1
+                elif reason == "collision":
+                    self._rl_collisions += 1
+                self._gym_obs, _ = self._gym.reset()
+
+    def _render_rl(self, surface: pygame.Surface) -> None:
+        surface.fill(BACKGROUND_COLOR)
+        g = self._gym
+
+        pygame.draw.circle(surface, GOAL_COLOR, (int(g._gx), int(g._gy)), int(g.goal_radius), 2)
+        pygame.draw.circle(surface, GOAL_COLOR, (int(g._gx), int(g._gy)), 6)
+
+        for o in g._obstacles:
+            pygame.draw.circle(surface, OBSTACLE_COLOR, (int(o.x), int(o.y)), int(o.r))
+
+        pygame.draw.circle(surface, AGENT_COLOR, (int(g._ax), int(g._ay)), int(g.agent_radius))
+        hx = g._ax + math.cos(g._heading) * (g.agent_radius + 10)
+        hy = g._ay + math.sin(g._heading) * (g.agent_radius + 10)
+        pygame.draw.line(surface, AGENT_HEADING_COLOR, (g._ax, g._ay), (hx, hy), 2)
+
+        rate = (self._rl_goals / self._rl_episodes * 100.0) if self._rl_episodes else 0.0
+        lines = [
+            "Controller: RL (trained policy)",
+            f"Episodes: {self._rl_episodes}",
+            f"Goals: {self._rl_goals}   Collisions: {self._rl_collisions}",
+            f"Success: {rate:.0f}%",
+        ]
+        y = 6
+        for ln in lines:
+            surface.blit(self._font.render(ln, True, (230, 230, 230)), (8, y))
+            y += 20
 
     def handle_event(self, event: pygame.event.Event) -> None:
+        if getattr(self, "_rl_mode", False):
+            return
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_o:
                 self._spawn_moving_obstacles(self._moving_obstacle_target_count())
@@ -139,6 +230,10 @@ class Environment:
                 self.grid_map.clear_cell(*cell)
                 self._replan_timer = REPLAN_INTERVAL
                 return
+
+    def _add_static_obstacles(self) -> None:
+        """No static obstacles - only moving obstacles"""
+        self.static_obstacles = []
 
     def _build_static_scenario(self) -> None:
         self.grid_map.grid[:, :] = 0
@@ -226,7 +321,8 @@ class Environment:
                 continue
 
             angle = random.uniform(0.0, math.tau)
-            speed = random.uniform(MOVING_OBSTACLE_MIN_SPEED, MOVING_OBSTACLE_MAX_SPEED)
+            # SLOW speeds for training
+            speed = random.uniform(10.0, 30.0)  # Much slower than before
             vx = math.cos(angle) * speed
             vy = math.sin(angle) * speed
 
@@ -265,6 +361,7 @@ class Environment:
     def _collect_local_obstacles(self) -> List[Tuple[float, float, float]]:
         obstacles: List[Tuple[float, float, float]] = []
 
+        # Only add moving obstacles (no static obstacles)
         for obs in self.obstacles:
             obstacles.append((obs.x, obs.y, obs.radius))
 
@@ -290,6 +387,11 @@ class Environment:
         self.agent.omega = 0.0
 
     def update(self, dt: float) -> None:
+        if self._rl_mode:
+            self._update_rl(dt)
+            return
+
+        # Update moving obstacles
         for obs in self.obstacles:
             obs.update(dt)
 
@@ -302,6 +404,7 @@ class Environment:
             self._reset_agent()
             self._replan_timer = REPLAN_INTERVAL
 
+        # Check collisions with moving obstacles
         for obs in self.obstacles:
             if circle_collision(self.agent.x, self.agent.y, float(AGENT_RADIUS), obs.x, obs.y, obs.radius):
                 self._collisions += 1
@@ -330,6 +433,10 @@ class Environment:
             self._csv_writer.writerow(row)
 
     def render(self, surface: pygame.Surface) -> None:
+        if self._rl_mode:
+            self._render_rl(surface)
+            return
+
         surface.fill(BACKGROUND_COLOR)
         self.grid_map.draw(surface)
 
@@ -343,6 +450,9 @@ class Environment:
         pygame.draw.circle(surface, START_COLOR, (int(start_pos[0]), int(start_pos[1])), 8)
         pygame.draw.circle(surface, GOAL_COLOR, (int(goal_pos[0]), int(goal_pos[1])), 8)
 
+        # No static obstacles to draw
+
+        # Draw moving obstacles
         for obs in self.obstacles:
             obs.draw(surface)
 

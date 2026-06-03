@@ -14,6 +14,7 @@ from config import (
     USE_DWA,
     WAYPOINT_TOLERANCE_PX,
 )
+from core.dynamics import KinematicLimits, step_unicycle
 from planning.dwa import config_from_dict, dwa_step
 
 
@@ -26,6 +27,12 @@ class Agent:
         self.omega = 0.0
 
         self._dwa_cfg = config_from_dict(DWA_CONFIG)
+        self._limits = KinematicLimits(
+            max_speed=self._dwa_cfg.max_speed,
+            min_speed=self._dwa_cfg.min_speed,
+            max_yaw_rate=self._dwa_cfg.max_yaw_rate,
+            max_accel=self._dwa_cfg.max_accel,
+        )
         self._debug_traj: List[Tuple[float, float]] = []
 
         self._path: List[Tuple[float, float]] = []
@@ -77,14 +84,10 @@ class Agent:
             )
             self._debug_traj = traj
 
-            self.speed = max(self._dwa_cfg.min_speed, min(self._dwa_cfg.max_speed, v_cmd))
-            self.omega = max(-self._dwa_cfg.max_yaw_rate, min(self._dwa_cfg.max_yaw_rate, omega_cmd))
-
-            self.heading += self.omega * dt
-            self.heading = ((self.heading + math.pi) % (2.0 * math.pi)) - math.pi
-
-            self.x += math.cos(self.heading) * self.speed * dt
-            self.y += math.sin(self.heading) * self.speed * dt
+            state = (self.x, self.y, self.heading, self.speed, self.omega)
+            self.x, self.y, self.heading, self.speed, self.omega = step_unicycle(
+                state, v_cmd, omega_cmd, dt, self._limits
+            )
             return
 
         self.heading = math.atan2(dy, dx)
