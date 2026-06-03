@@ -20,16 +20,16 @@ radius = 1.2
 
 [sub_resource type="StandardMaterial3D" id=5]
 shading_mode = 0
-albedo_color = Color(0.95, 0.85, 0.2, 1)
+albedo_color = Color(0.1, 1.0, 1.0, 1)
 emission_enabled = true
-emission = Color(0.95, 0.85, 0.2, 1)
+emission = Color(0.1, 1.0, 1.0, 1)
 emission_energy_multiplier = 2.0
 
 [sub_resource type="StandardMaterial3D" id=6]
 shading_mode = 0
-albedo_color = Color(0.72, 0.35, 1, 1)
+albedo_color = Color(1.0, 0.1, 1.0, 1)
 emission_enabled = true
-emission = Color(0.72, 0.35, 1, 1)
+emission = Color(1.0, 0.1, 1.0, 1)
 emission_energy_multiplier = 2.0
 
 [node name="Main" type="Node3D"]

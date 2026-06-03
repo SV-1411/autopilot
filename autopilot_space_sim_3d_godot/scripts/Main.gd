@@ -7,7 +7,7 @@ const WORLD_BOUNDS_MIN := Vector3(-90, 0, -90)
 const WORLD_BOUNDS_MAX := Vector3(90, 60, 90)
 const WORLD_ORIGIN := WORLD_BOUNDS_MIN
 const VOXEL_SIZE_M := 3.0
-const REPLAN_INTERVAL_S := 0.35
+const REPLAN_INTERVAL_S := 5.0
 const PREDICT_T_S := 1.0
 
 const GRID_SIZE := WORLD_BOUNDS_MAX - WORLD_BOUNDS_MIN
@@ -66,6 +66,7 @@ var _path_line: ImmediateMesh
 var _path_mesh_instance: MeshInstance3D
 
 func _ready() -> void:
+	randomize()
 	_run_button.pressed.connect(_toggle_run)
 	_add_asteroid_button.pressed.connect(_add_asteroid_at_cursor)
 	_apply_button.pressed.connect(_apply_inspector_to_selected)
@@ -87,7 +88,7 @@ func _setup_path_debug() -> void:
 	_path_mesh_instance.mesh = _path_line
 	_path_mesh_instance.material_override = StandardMaterial3D.new()
 	_path_mesh_instance.material_override.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_path_mesh_instance.material_override.albedo_color = Color(0.38, 0.68, 1.0)
+	_path_mesh_instance.material_override.albedo_color = Color(0.1, 1.0, 0.5, 1.0)
 	add_child(_path_mesh_instance)
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -204,6 +205,11 @@ func _toggle_run() -> void:
 	_mode_label.text = "Mode: RUN" if _running else "Mode: EDIT"
 	_run_button.text = "Stop" if _running else "Go"
 	_replan_timer = 0.0
+	if _running:
+		_replans = 0
+		# Force all asteroids to stop moving
+		for a in _asteroids:
+			a.velocity = Vector3.ZERO
 	_update_ui()
 
 func _add_asteroid_at_cursor() -> void:
@@ -213,7 +219,7 @@ func _add_asteroid_at_cursor() -> void:
 	var a := asteroid_scene.instantiate() as Asteroid
 	add_child(a)
 	a.global_position = p
-	a.velocity = Vector3(randf_range(-30, 30), randf_range(-5, 5), randf_range(-30, 30))
+	a.velocity = Vector3.ZERO  # Static obstacles
 	a.mass_kg = 1500.0
 	a.set_radius_m(2.0)
 	_asteroids.append(a)
@@ -248,6 +254,7 @@ func _select(node: Node3D) -> void:
 	_selected_label.text = "Selected: %s" % _selected.name
 	if _selected.has_method("set_selected"):
 		_selected.call("set_selected", true)
+	$CameraRig.focus(_selected.global_position)
 	_populate_inspector_from_selected()
 
 func _drag_selected(mouse_pos: Vector2) -> void:
@@ -307,8 +314,7 @@ func _physics_process(dt: float) -> void:
 	if not _running:
 		return
 
-	for a in _asteroids:
-		a.step_sim(dt)
+	# Asteroids are now static - don't update them
 
 	_replan_timer += dt
 	if _replan_timer >= REPLAN_INTERVAL_S:
@@ -343,19 +349,18 @@ func _plan_and_set_path() -> void:
 	_update_ui()
 
 func _build_predicted_occupancy() -> Dictionary:
+	# Simple static obstacle blocking - just mark current asteroid positions
 	var blocked := {}
 	for a in _asteroids:
 		var pad := int(ceil((a.radius_m + _ship.ship_radius_m) / VOXEL_SIZE_M))
-		var t := 0.0
-		while t <= PREDICT_HORIZON_S + 1e-6:
-			var predicted := a.global_position + a.velocity * t
-			var c := _world_to_cell(predicted)
-			for dx in range(-pad, pad + 1):
-				for dy in range(-pad, pad + 1):
-					for dz in range(-pad, pad + 1):
-						var cc := Vector3i(c.x + dx, c.y + dy, c.z + dz)
+		pad = clampi(pad, 1, 6)  # Smaller padding for static obstacles
+		var c := _world_to_cell(a.global_position)
+		for dx in range(-pad, pad + 1):
+			for dy in range(-pad, pad + 1):
+				for dz in range(-pad, pad + 1):
+					var cc := Vector3i(c.x + dx, c.y + dy, c.z + dz)
+					if _cell_in_bounds(cc):
 						blocked[cc] = true
-			t += PREDICT_DT_S
 	return blocked
 
 func _cell_is_free(c: Vector3i, blocked: Dictionary) -> bool:
@@ -381,11 +386,13 @@ func _clamp_to_bounds(p: Vector3) -> Vector3:
 
 func _world_to_cell(p: Vector3) -> Vector3i:
 	var lp := p - WORLD_ORIGIN
-	return Vector3i(
-		int(floor(lp.x / VOXEL_SIZE_M)),
-		int(floor(lp.y / VOXEL_SIZE_M)),
-		int(floor(lp.z / VOXEL_SIZE_M))
-	)
+	var cx := int(floor(lp.x / VOXEL_SIZE_M))
+	var cy := int(floor(lp.y / VOXEL_SIZE_M))
+	var cz := int(floor(lp.z / VOXEL_SIZE_M))
+	cx = clampi(cx, 0, GRID_CELLS_X - 1)
+	cy = clampi(cy, 0, GRID_CELLS_Y - 1)
+	cz = clampi(cz, 0, GRID_CELLS_Z - 1)
+	return Vector3i(cx, cy, cz)
 
 func _cell_to_world(c: Vector3i) -> Vector3:
 	return WORLD_ORIGIN + Vector3(

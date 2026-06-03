@@ -15,14 +15,15 @@ func _ready() -> void:
 	_base_material = _mesh.material_override
 	_highlight_material = StandardMaterial3D.new()
 	_highlight_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_highlight_material.albedo_color = Color(1.0, 0.95, 0.2, 1.0)
+	_highlight_material.albedo_color = Color(1.0, 0.3, 0.1, 1.0)
 	_highlight_material.emission_enabled = true
-	_highlight_material.emission = Color(1.0, 0.95, 0.2, 1.0)
+	_highlight_material.emission = Color(1.0, 0.3, 0.1, 1.0)
 	_highlight_material.emission_energy_multiplier = 2.0
 	_apply_radius()
 
 func step_sim(dt: float) -> void:
-	global_position += velocity * dt
+	# Static obstacles - don't move
+	pass
 
 func set_radius_m(r: float) -> void:
 	radius_m = max(0.25, r)

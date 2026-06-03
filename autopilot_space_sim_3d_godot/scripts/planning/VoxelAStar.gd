@@ -1,6 +1,44 @@
 extends RefCounted
 class_name VoxelAStar
 
+static func _heap_push(heap: Array, item: Dictionary) -> void:
+	heap.push_back(item)
+	var i := heap.size() - 1
+	while i > 0:
+		var p := (i - 1) >> 1
+		if int(heap[p]["f"]) <= int(heap[i]["f"]):
+			break
+		var tmp := heap[p]
+		heap[p] = heap[i]
+		heap[i] = tmp
+		i = p
+
+static func _heap_pop(heap: Array) -> Dictionary:
+	var out := heap[0]
+	var last := heap.pop_back()
+	if heap.size() == 0:
+		return out
+	heap[0] = last
+	var i := 0
+	while true:
+		var l := i * 2 + 1
+		var r := l + 1
+		if l >= heap.size():
+			break
+		var smallest := l
+		if r < heap.size() and int(heap[r]["f"]) < int(heap[l]["f"]):
+			smallest = r
+		if int(heap[i]["f"]) <= int(heap[smallest]["f"]):
+			break
+		var tmp := heap[i]
+		heap[i] = heap[smallest]
+		heap[smallest] = tmp
+		i = smallest
+	return out
+
+static func _heap_is_empty(heap: Array) -> bool:
+	return heap.size() == 0
+
 static func _heuristic(a: Vector3i, b: Vector3i) -> int:
 	return abs(a.x - b.x) + abs(a.y - b.y) + abs(a.z - b.z)
 
@@ -26,7 +64,7 @@ static func plan(
 		return []
 
 	var open: Array = []
-	open.push_back({"f": _heuristic(start, goal), "g": 0, "n": start})
+	_heap_push(open, {"f": _heuristic(start, goal), "g": 0, "n": start})
 
 	var came_from := {}
 	var g_score := {}
@@ -35,9 +73,8 @@ static func plan(
 	var closed := {}
 	var expansions := 0
 
-	while open.size() > 0:
-		open.sort_custom(func(a, b): return a["f"] < b["f"]) 
-		var current = open.pop_front()
+	while not _heap_is_empty(open):
+		var current = _heap_pop(open)
 		var node: Vector3i = current["n"]
 		if closed.has(node):
 			continue
@@ -63,7 +100,7 @@ static func plan(
 				came_from[nb] = node
 				g_score[nb] = tentative_g
 				var f := tentative_g + _heuristic(nb, goal)
-				open.push_back({"f": f, "g": tentative_g, "n": nb})
+				_heap_push(open, {"f": f, "g": tentative_g, "n": nb})
 
 	return []
 
