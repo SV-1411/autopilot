@@ -72,6 +72,14 @@ static func plan(
 	# speed; close in -> the ship is forced to slow down and arrive cleanly.
 	var v_cap := minf(v_max, sqrt(2.0 * a_max * maxf(0.0, arrival_dist)))
 
+	# Predict every obstacle's position at each look-ahead step ONCE, then reuse
+	# across all candidates (the prediction doesn't depend on the ship's choice).
+	# This is the key performance optimisation -- without it the predictor runs
+	# once per candidate per step, ~50x more work.
+	var sim_dt := float(c["sim_dt"])
+	var steps := int(ceil(float(c["horizon"]) / sim_dt))
+	var predicted := _predict_frames(obstacles, steps, sim_dt, bounds_min, bounds_max)
+
 	var best_cost := INF
 	var best_accel := Vector3.ZERO
 
@@ -81,8 +89,7 @@ static func plan(
 		if cand_v.length() > v_max:
 			cand_v = cand_v.normalized() * v_max
 
-		var result := _simulate(ship_pos, cand_v, obstacles, ship_radius,
-				bounds_min, bounds_max, c)
+		var result := _simulate(ship_pos, cand_v, predicted, ship_radius, sim_dt, steps)
 		if result["collides"]:
 			continue
 
@@ -127,32 +134,41 @@ static func plan(
 
 	return best_accel
 
-# Roll the ship (constant cand_v) and all obstacles forward; return whether a
-# collision is predicted, the closest approach distance, and the end position.
+# Precompute predicted obstacle positions for every look-ahead step.
+# Returns Array[step] -> Array of { "p": Vector3, "sr": float } where sr is the
+# pre-summed collision radius offset is handled by the caller (ship_radius).
+static func _predict_frames(obstacles: Array, steps: int, dt: float,
+		bounds_min: Vector3, bounds_max: Vector3) -> Array:
+	var frames: Array = []
+	var t := 0.0
+	for s in range(steps):
+		t += dt
+		var frame: Array = []
+		for obs in obstacles:
+			frame.append({
+				"p": Predictor.predict(obs["pos"], obs["vel"], t, bounds_min, bounds_max),
+				"r": float(obs["radius"]),
+			})
+		frames.append(frame)
+	return frames
+
+# Roll the ship (constant cand_v) forward against precomputed obstacle frames;
+# return whether a collision is predicted, the closest approach, and end pos.
 static func _simulate(
 		start_pos: Vector3,
 		cand_v: Vector3,
-		obstacles: Array,
+		predicted: Array,
 		ship_radius: float,
-		bounds_min: Vector3,
-		bounds_max: Vector3,
-		c: Dictionary
+		dt: float,
+		steps: int
 ) -> Dictionary:
-	var horizon := float(c["horizon"])
-	var dt := float(c["sim_dt"])
-	var steps := int(ceil(horizon / dt))
-
 	var p := start_pos
 	var min_clear := INF
-	var t := 0.0
 
 	for s in range(steps):
-		t += dt
 		p += cand_v * dt
-
-		for obs in obstacles:
-			var op: Vector3 = Predictor.predict(obs["pos"], obs["vel"], t, bounds_min, bounds_max)
-			var d: float = p.distance_to(op) - (ship_radius + float(obs["radius"]))
+		for o in predicted[s]:
+			var d: float = p.distance_to(o["p"]) - (ship_radius + float(o["r"]))
 			if d < min_clear:
 				min_clear = d
 			if d <= 0.0:

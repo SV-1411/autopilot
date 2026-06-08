@@ -1,46 +1,32 @@
 extends Node3D
 
-# Scene orchestrator + interactive testbed.
+# Interactive front-end for the autopilot.
 #
-# Responsibilities:
-#   - Owns the world (ship, asteroids, bounds) and the EDIT/RUN mode.
-#   - EDIT mode: place/select/drag asteroids, set start & goal, tune metrics.
-#   - RUN mode: moves the asteroids, runs the global planner (Voxel A* over a
-#     PREDICTED occupancy grid), feeds the live world to the ship's local
-#     planner, detects collisions, and reports flight metrics.
+# Architecture: the simulation itself lives in SimWorld (headless engine). This
+# scene is a VIEW + EDITOR over it:
+#   - EDIT mode: you place/select/drag asteroids, set start/goal, tune metrics,
+#     and save/load scenarios. The scene nodes hold the editable design.
+#   - RUN mode: a SimWorld is built from the scene, advanced each physics tick,
+#     and the nodes are synced to its state for display. Stopping restores the
+#     designed scenario so you can keep editing.
 #
-# The autopilot is split in two layers, exactly like a real guidance system:
-#   * Global planner (VoxelAStar, here)      -> a coarse, safe corridor.
-#   * Local planner (LocalPlanner3D, in Ship) -> fast reactive avoidance of
-#                                                moving asteroids.
+# Because RUN uses the same SimWorld as the batch evaluator (tools/BatchEval.gd),
+# what you see interactively matches the benchmark exactly.
 
 @export var ship_scene: PackedScene
 @export var asteroid_scene: PackedScene
 
 const WORLD_BOUNDS_MIN := Vector3(-90, 0, -90)
 const WORLD_BOUNDS_MAX := Vector3(90, 60, 90)
-const WORLD_ORIGIN := WORLD_BOUNDS_MIN
-const VOXEL_SIZE_M := 3.0
-
-const REPLAN_INTERVAL_S := 1.0      # how often the global A* corridor refreshes
-# Times (s) ahead at which we stamp predicted asteroid positions into the grid,
-# carving a corridor around their swept path for the global planner.
-const PREDICT_SAMPLE_TIMES := [0.0, 0.5, 1.0, 1.5, 2.0]
-
-const GRID_SIZE := WORLD_BOUNDS_MAX - WORLD_BOUNDS_MIN
-const GRID_CELLS_X := int(ceil(GRID_SIZE.x / VOXEL_SIZE_M))
-const GRID_CELLS_Y := int(ceil(GRID_SIZE.y / VOXEL_SIZE_M))
-const GRID_CELLS_Z := int(ceil(GRID_SIZE.z / VOXEL_SIZE_M))
 
 const DEFAULT_PLACE_DISTANCE_M := 90.0
 const PLACE_DISTANCE_STEP_M := 5.0
 const NUDGE_STEP_M := 1.0
-
-const BELT_COUNT := 18              # asteroids spawned by the belt generator (B)
+const BELT_COUNT := 18
 
 var _running := false
-var _replan_timer := 0.0
-var _replans := 0
+var _sim: SimWorld = null
+var _preview_path: Array[Vector3] = []
 
 var _ship: Ship
 var _asteroids: Array[Asteroid] = []
@@ -55,12 +41,12 @@ var _dragging := false
 var _drag_start_mouse: Vector2
 var _drag_start_pos: Vector3
 
-# Flight metrics (per run).
-var _run_time := 0.0
-var _collisions := 0
-var _min_clearance := INF
-var _contact := {}                 # asteroid instance ids currently in contact
-var _status := "EDIT"
+# Saved node state to restore when a run stops.
+var _restore_asteroids: Array = []
+
+var _rng := RandomNumberGenerator.new()
+var _file_dialog: FileDialog
+var _file_mode := ""   # "save" or "load"
 
 @onready var _camera: Camera3D = $CameraRig/Pivot/Camera3D
 @onready var _start_marker: Node3D = $StartMarker
@@ -72,6 +58,8 @@ var _status := "EDIT"
 @onready var _selected_label: Label = $UI/Panel/VBox/SelectedLabel
 @onready var _metrics_label: Label = $UI/Panel/VBox/MetricsLabel
 @onready var _hint_label: Label = $UI/Panel/VBox/HintLabel
+@onready var _vbox: VBoxContainer = $UI/Panel/VBox
+@onready var _ui_layer: CanvasLayer = $UI
 
 @onready var _pos_x: SpinBox = $UI/Inspector/InspectorVBox/PosGrid/PosX
 @onready var _pos_y: SpinBox = $UI/Inspector/InspectorVBox/PosGrid/PosY
@@ -87,24 +75,43 @@ var _path_line: ImmediateMesh
 var _path_mesh_instance: MeshInstance3D
 
 func _ready() -> void:
-	randomize()
+	_rng.randomize()
 	_run_button.pressed.connect(_toggle_run)
 	_add_asteroid_button.pressed.connect(_add_asteroid_at_cursor)
 	_apply_button.pressed.connect(_apply_inspector_to_selected)
 
+	_add_save_load_buttons()
+	_setup_file_dialog()
+
 	_ship = ship_scene.instantiate() as Ship
 	add_child(_ship)
 	_ship.global_position = _start_pos
-	_ship.set_running(false)
-	_ship.set_world_bounds(WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
 	_start_marker.global_position = _start_pos
 	_goal_marker.global_position = _goal_pos
 
-	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge selected up/down"
+	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge up/down"
 
 	_setup_path_debug()
+	_replan_preview()
 	_update_ui()
-	_plan_and_set_path()
+
+func _add_save_load_buttons() -> void:
+	var save_btn := Button.new()
+	save_btn.text = "Save Scenario"
+	save_btn.pressed.connect(_on_save_pressed)
+	_vbox.add_child(save_btn)
+	var load_btn := Button.new()
+	load_btn.text = "Load Scenario"
+	load_btn.pressed.connect(_on_load_pressed)
+	_vbox.add_child(load_btn)
+
+func _setup_file_dialog() -> void:
+	_file_dialog = FileDialog.new()
+	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	_file_dialog.use_native_dialog = true
+	_file_dialog.add_filter("*.json", "Scenario JSON")
+	_file_dialog.file_selected.connect(_on_file_selected)
+	_ui_layer.add_child(_file_dialog)
 
 func _setup_path_debug() -> void:
 	_path_line = ImmediateMesh.new()
@@ -115,6 +122,84 @@ func _setup_path_debug() -> void:
 	_path_mesh_instance.material_override.albedo_color = Color(0.1, 1.0, 0.5, 1.0)
 	add_child(_path_mesh_instance)
 
+# ============================================================ build / sync sim
+# Build a SimWorld from the current editable scene.
+func _build_sim() -> SimWorld:
+	var sim := SimWorld.new()
+	sim.bounds_min = WORLD_BOUNDS_MIN
+	sim.bounds_max = WORLD_BOUNDS_MAX
+	sim.start_pos = _ship.global_position
+	sim.goal_pos = _goal_pos
+	sim.ship_radius = _ship.ship_radius_m
+	sim.ship_mass = _ship.mass_kg
+	sim.ship_max_thrust = _ship.max_thrust_n
+	sim.ship_max_speed = _ship.max_speed_mps
+	sim.ship_target_speed = _ship.target_speed_mps
+	sim.planner_cfg = _ship.planner_cfg
+	var rocks: Array[Dictionary] = []
+	for a in _asteroids:
+		rocks.append({"pos": a.global_position, "vel": a.velocity, "radius": a.radius_m, "mass": a.mass_kg})
+	sim.asteroids = rocks
+	return sim
+
+# Rebuild the green preview path (EDIT mode) using the real planner.
+func _replan_preview() -> void:
+	var sim := _build_sim()
+	sim.ship_pos = _ship.global_position
+	sim.plan_path()
+	_preview_path = sim.path
+	_draw_path(_preview_path)
+	_update_ui()
+
+# ============================================================ run lifecycle
+func _toggle_run() -> void:
+	_running = not _running
+	_run_button.text = "Stop" if _running else "Go"
+	if _running:
+		_start_run()
+	else:
+		_stop_run()
+	_update_ui()
+
+func _start_run() -> void:
+	_select(null)
+	# Snapshot the design so we can restore it when the run ends.
+	_restore_asteroids = []
+	for a in _asteroids:
+		_restore_asteroids.append({"pos": a.global_position, "vel": a.velocity})
+	_sim = _build_sim()
+	_sim.reset_run()
+
+func _stop_run() -> void:
+	# Restore the designed scenario.
+	if _restore_asteroids.size() == _asteroids.size():
+		for i in range(_asteroids.size()):
+			_asteroids[i].global_position = _restore_asteroids[i]["pos"]
+			_asteroids[i].velocity = _restore_asteroids[i]["vel"]
+	_ship.global_position = _start_pos
+	_sim = null
+	_replan_preview()
+
+func _physics_process(dt: float) -> void:
+	if not _running or _sim == null:
+		return
+
+	_sim.step(dt)
+
+	# Sync visuals from the engine state.
+	_ship.global_position = _sim.ship_pos
+	_ship.face_velocity(_sim.ship_vel)
+	for i in range(min(_asteroids.size(), _sim.asteroids.size())):
+		_asteroids[i].global_position = _sim.asteroids[i]["pos"]
+	_draw_path(_sim.path)
+	_update_ui()
+
+	if _sim.is_terminal():
+		_running = false
+		_run_button.text = "Go"
+		_update_ui()
+
+# ============================================================ input
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_run"):
 		_toggle_run()
@@ -123,7 +208,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		_add_asteroid_at_cursor()
 		return
 
-	# Edit-mode helpers
 	if not _running and event is InputEventKey:
 		var k := event as InputEventKey
 		if not k.pressed or k.echo:
@@ -145,19 +229,18 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _selected != null and k.keycode == KEY_R:
 			_selected.global_position.y += NUDGE_STEP_M
 			_populate_inspector_from_selected()
-			_plan_and_set_path()
+			_replan_preview()
 			return
 		if _selected != null and k.keycode == KEY_F:
 			_selected.global_position.y -= NUDGE_STEP_M
 			_populate_inspector_from_selected()
-			_plan_and_set_path()
+			_replan_preview()
 			return
 
 	if event.is_action_pressed("select_object"):
 		_handle_click(event)
 		return
 
-	# Alt+LMB drag selected object in edit mode
 	if not _running and event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_LEFT and mb.alt_pressed:
@@ -179,6 +262,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 
 func _handle_click(event: InputEvent) -> void:
+	if _running:
+		return
 	var mouse_event := event as InputEventMouseButton
 	var shift_down := false
 	var ctrl_down := false
@@ -201,14 +286,13 @@ func _handle_click(event: InputEvent) -> void:
 	if shift_down:
 		_goal_pos = _hit_to_world(hit, ray_origin, ray_dir)
 		_goal_marker.global_position = _goal_pos
-		_plan_and_set_path()
+		_replan_preview()
 		return
 	if ctrl_down:
 		_start_pos = _hit_to_world(hit, ray_origin, ray_dir)
 		_ship.global_position = _start_pos
-		_ship.velocity = Vector3.ZERO
 		_start_marker.global_position = _start_pos
-		_plan_and_set_path()
+		_replan_preview()
 		return
 
 	if hit and hit.has("collider"):
@@ -226,30 +310,14 @@ func _hit_to_world(hit: Dictionary, ray_origin: Vector3, ray_dir: Vector3) -> Ve
 		return hit["position"]
 	return ray_origin + ray_dir * _place_distance_m
 
-func _toggle_run() -> void:
-	_running = not _running
-	_ship.set_running(_running)
-	_run_button.text = "Stop" if _running else "Go"
-	_replan_timer = 0.0
-	if _running:
-		# Fresh run: reset metrics and ship to the start.
-		_replans = 0
-		_run_time = 0.0
-		_collisions = 0
-		_min_clearance = INF
-		_contact.clear()
-		_ship.global_position = _start_pos
-		_ship.velocity = Vector3.ZERO
-		_plan_and_set_path()
-	_update_ui()
-
+# ============================================================ asteroid editing
 func _add_asteroid_at_cursor() -> void:
 	if _running:
 		return
 	var p := _point_under_mouse_3d()
 	var a := _spawn_asteroid(p, Vector3.ZERO, 2.0, 1500.0)
 	_select(a)
-	_plan_and_set_path()
+	_replan_preview()
 
 func _spawn_asteroid(pos: Vector3, vel: Vector3, radius: float, mass: float) -> Asteroid:
 	var a := asteroid_scene.instantiate() as Asteroid
@@ -261,49 +329,27 @@ func _spawn_asteroid(pos: Vector3, vel: Vector3, radius: float, mass: float) -> 
 	_asteroids.append(a)
 	return a
 
-# Scatter a field of moving asteroids (the headline test scenario).
 func _generate_belt(n: int) -> void:
 	if _running:
 		return
 	_clear_asteroids()
-	var attempts := 0
-	while _asteroids.size() < n and attempts < n * 40:
-		attempts += 1
-		var pos := Vector3(
-			randf_range(WORLD_BOUNDS_MIN.x + 5.0, WORLD_BOUNDS_MAX.x - 5.0),
-			randf_range(WORLD_BOUNDS_MIN.y + 5.0, WORLD_BOUNDS_MAX.y - 5.0),
-			randf_range(WORLD_BOUNDS_MIN.z + 5.0, WORLD_BOUNDS_MAX.z - 5.0)
-		)
-		# Keep the start and goal regions clear so the run is solvable.
-		if pos.distance_to(_start_pos) < 18.0 or pos.distance_to(_goal_pos) < 18.0:
-			continue
-		var radius := randf_range(1.5, 4.0)
-		var speed := randf_range(4.0, 18.0)
-		var vel := _random_unit() * speed
-		_spawn_asteroid(pos, vel, radius, radius * 500.0)
+	var rocks := SimWorld.random_belt(n, _rng, _start_pos, _goal_pos, WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
+	for r in rocks:
+		_spawn_asteroid(r["pos"], r["vel"], r["radius"], r["mass"])
 	_select(null)
-	_plan_and_set_path()
-	_update_ui()
+	_replan_preview()
 
 func _clear_asteroids() -> void:
 	for a in _asteroids:
 		a.queue_free()
 	_asteroids.clear()
 	_select(null)
-	_plan_and_set_path()
-	_update_ui()
-
-func _random_unit() -> Vector3:
-	var v := Vector3(randf() - 0.5, randf() - 0.5, randf() - 0.5)
-	if v.length() < 1e-4:
-		return Vector3.RIGHT
-	return v.normalized()
+	_replan_preview()
 
 func _point_under_mouse_3d() -> Vector3:
 	var mouse_pos := get_viewport().get_mouse_position()
 	var ray_origin := _camera.project_ray_origin(mouse_pos)
 	var ray_dir := _camera.project_ray_normal(mouse_pos)
-
 	var space := get_world_3d().direct_space_state
 	var query := PhysicsRayQueryParameters3D.new()
 	query.from = ray_origin
@@ -318,7 +364,6 @@ func _point_under_mouse_3d() -> Vector3:
 func _select(node: Node3D) -> void:
 	if _selected != null and _selected.has_method("set_selected"):
 		_selected.call("set_selected", false)
-
 	_selected = node
 	if _selected == null:
 		_selected_label.text = "Selected: none"
@@ -332,7 +377,6 @@ func _select(node: Node3D) -> void:
 func _drag_selected(mouse_pos: Vector2) -> void:
 	var ray_origin := _camera.project_ray_origin(mouse_pos)
 	var ray_dir := _camera.project_ray_normal(mouse_pos)
-
 	var plane := Plane(-_camera.global_transform.basis.z, _drag_start_pos)
 	var denom := plane.normal.dot(ray_dir)
 	if abs(denom) < 1e-5:
@@ -343,7 +387,7 @@ func _drag_selected(mouse_pos: Vector2) -> void:
 	var hit := ray_origin + ray_dir * t
 	_selected.global_position = _clamp_to_bounds(hit)
 	_populate_inspector_from_selected()
-	_plan_and_set_path()
+	_replan_preview()
 
 func _populate_inspector_from_selected() -> void:
 	if _selected == null or not _selected.has_method("editor_get_position"):
@@ -373,144 +417,62 @@ func _apply_inspector_to_selected() -> void:
 		_selected.call("editor_set_mass_kg", float(_mass.value))
 	if _selected.has_method("editor_set_radius_m"):
 		_selected.call("editor_set_radius_m", float(_radius.value))
-	_plan_and_set_path()
+	_replan_preview()
 
-func _physics_process(dt: float) -> void:
-	if not _running:
+# ============================================================ save / load
+func _on_save_pressed() -> void:
+	if _running:
 		return
+	_file_mode = "save"
+	_file_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
+	_file_dialog.current_file = "scenario.json"
+	_file_dialog.popup_centered_ratio(0.6)
 
-	_run_time += dt
+func _on_load_pressed() -> void:
+	if _running:
+		return
+	_file_mode = "load"
+	_file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_file_dialog.popup_centered_ratio(0.6)
 
-	# 1. Move the asteroids (constant velocity + reflect at bounds).
-	for a in _asteroids:
-		a.integrate(dt, WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
+func _on_file_selected(path: String) -> void:
+	if _file_mode == "save":
+		var ok := SimWorld.save_to_file(path, _build_sim().to_scenario())
+		print("Save scenario -> ", path, "  ok=", ok)
+	elif _file_mode == "load":
+		var d := SimWorld.load_from_file(path)
+		if d.is_empty():
+			push_error("Failed to load scenario: " + path)
+			return
+		_apply_scenario(d)
+		print("Loaded scenario <- ", path)
 
-	# 2. Hand the live world to the ship's local planner.
-	_ship.set_obstacles(_obstacle_snapshot())
-	_ship.set_world_bounds(WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
-
-	# 3. Periodically refresh the global A* corridor against predicted occupancy.
-	_replan_timer += dt
-	if _replan_timer >= REPLAN_INTERVAL_S:
-		_plan_and_set_path()
-		_replan_timer = 0.0
-		_replans += 1
-
-	# 4. Fly the ship (reactive local avoidance happens inside step_sim).
-	_ship.step_sim(dt)
-
-	# 5. Measure safety + progress.
-	_update_metrics()
-	_update_ui()
-
-func _obstacle_snapshot() -> Array:
-	var out: Array = []
-	for a in _asteroids:
-		out.append({"pos": a.global_position, "vel": a.velocity, "radius": a.radius_m})
-	return out
-
-func _update_metrics() -> void:
-	var nearest := INF
-	for a in _asteroids:
-		var d := _ship.global_position.distance_to(a.global_position) - (_ship.ship_radius_m + a.radius_m)
-		nearest = minf(nearest, d)
-		var id := a.get_instance_id()
-		if d <= 0.0:
-			if not _contact.has(id):
-				_contact[id] = true
-				_collisions += 1
-		else:
-			_contact.erase(id)
-	if nearest != INF:
-		_min_clearance = minf(_min_clearance, nearest)
-
-	if _collisions > 0:
-		_status = "COLLISION"
-	elif _ship.has_arrived():
-		_status = "ARRIVED"
-		_running = false
-		_ship.set_running(false)
-		_run_button.text = "Go"
-	else:
-		_status = "FLYING"
-
-func _plan_and_set_path() -> void:
-	_ship.global_position = _clamp_to_bounds(_ship.global_position)
-	_goal_pos = _clamp_to_bounds(_goal_pos)
-	_start_marker.global_position = _ship.global_position
+func _apply_scenario(d: Dictionary) -> void:
+	var tmp := SimWorld.new()
+	tmp.load_scenario(d)
+	_clear_asteroids()
+	_start_pos = tmp.start_pos
+	_goal_pos = tmp.goal_pos
+	_ship.global_position = _start_pos
+	_ship.ship_radius_m = tmp.ship_radius
+	_ship.mass_kg = tmp.ship_mass
+	_ship.max_thrust_n = tmp.ship_max_thrust
+	_ship.max_speed_mps = tmp.ship_max_speed
+	_ship.target_speed_mps = tmp.ship_target_speed
+	_ship.planner_cfg = tmp.planner_cfg
+	_start_marker.global_position = _start_pos
 	_goal_marker.global_position = _goal_pos
+	for r in tmp.asteroids:
+		_spawn_asteroid(r["pos"], r["vel"], r["radius"], r["mass"])
+	_select(null)
+	_replan_preview()
 
-	var start_cell := _world_to_cell(_ship.global_position)
-	var goal_cell := _world_to_cell(_goal_pos)
-
-	var blocked := _build_predicted_occupancy()
-	var is_free := func(c: Vector3i) -> bool:
-		return _cell_is_free(c, blocked)
-
-	var cell_path: Array[Vector3i] = VoxelAStar.plan(start_cell, goal_cell, is_free, 120000)
-	var world_path: Array[Vector3] = []
-	for c in cell_path:
-		world_path.append(_cell_to_world(c))
-
-	_ship.set_waypoints(world_path)
-	_draw_path(world_path)
-	_update_ui()
-
-# Stamp each asteroid's PREDICTED positions (over the look-ahead) into the grid,
-# padded by the combined radius. This carves a corridor around moving rocks so
-# the global path already leans away from them; the local planner does the rest.
-func _build_predicted_occupancy() -> Dictionary:
-	var blocked := {}
-	for a in _asteroids:
-		var pad := int(ceil((a.radius_m + _ship.ship_radius_m) / VOXEL_SIZE_M))
-		pad = clampi(pad, 1, 6)
-		for t in PREDICT_SAMPLE_TIMES:
-			var fp: Vector3 = Predictor.predict(a.global_position, a.velocity, float(t), WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
-			var c := _world_to_cell(fp)
-			for dx in range(-pad, pad + 1):
-				for dy in range(-pad, pad + 1):
-					for dz in range(-pad, pad + 1):
-						var cc := Vector3i(c.x + dx, c.y + dy, c.z + dz)
-						if _cell_in_bounds(cc):
-							blocked[cc] = true
-	return blocked
-
-func _cell_is_free(c: Vector3i, blocked: Dictionary) -> bool:
-	if not _cell_in_bounds(c):
-		return false
-	if blocked.has(c):
-		return false
-	return true
-
-func _cell_in_bounds(c: Vector3i) -> bool:
-	return (
-		c.x >= 0 and c.x < GRID_CELLS_X
-		and c.y >= 0 and c.y < GRID_CELLS_Y
-		and c.z >= 0 and c.z < GRID_CELLS_Z
-	)
-
+# ============================================================ rendering helpers
 func _clamp_to_bounds(p: Vector3) -> Vector3:
 	return Vector3(
 		clampf(p.x, WORLD_BOUNDS_MIN.x, WORLD_BOUNDS_MAX.x),
 		clampf(p.y, WORLD_BOUNDS_MIN.y, WORLD_BOUNDS_MAX.y),
 		clampf(p.z, WORLD_BOUNDS_MIN.z, WORLD_BOUNDS_MAX.z)
-	)
-
-func _world_to_cell(p: Vector3) -> Vector3i:
-	var lp := p - WORLD_ORIGIN
-	var cx := int(floor(lp.x / VOXEL_SIZE_M))
-	var cy := int(floor(lp.y / VOXEL_SIZE_M))
-	var cz := int(floor(lp.z / VOXEL_SIZE_M))
-	cx = clampi(cx, 0, GRID_CELLS_X - 1)
-	cy = clampi(cy, 0, GRID_CELLS_Y - 1)
-	cz = clampi(cz, 0, GRID_CELLS_Z - 1)
-	return Vector3i(cx, cy, cz)
-
-func _cell_to_world(c: Vector3i) -> Vector3:
-	return WORLD_ORIGIN + Vector3(
-		(float(c.x) + 0.5) * VOXEL_SIZE_M,
-		(float(c.y) + 0.5) * VOXEL_SIZE_M,
-		(float(c.z) + 0.5) * VOXEL_SIZE_M
 	)
 
 func _draw_path(points: Array[Vector3]) -> void:
@@ -525,28 +487,28 @@ func _draw_path(points: Array[Vector3]) -> void:
 func _update_ui() -> void:
 	_mode_label.text = "Mode: %s" % ("RUN" if _running else "EDIT")
 
-	var path := _ship.get_waypoints()
-	var remaining := 0.0
-	if path.size() >= 2:
-		var idx := _ship.get_waypoint_index()
-		var prev := _ship.global_position
-		for i in range(idx, path.size()):
-			remaining += prev.distance_to(path[i])
-			prev = path[i]
-
-	var clr := "n/a" if _min_clearance == INF else "%.1f m" % _min_clearance
-	var speed := _ship.velocity.length()
-
-	_metrics_label.text = (
-		"Metrics:\n"
-		+ "- Status: %s\n" % _status
-		+ "- Time: %.1f s\n" % _run_time
-		+ "- Speed: %.1f m/s\n" % speed
-		+ "- Remaining: %.1f m\n" % remaining
-		+ "- Min clearance: %s\n" % clr
-		+ "- Collisions: %d\n" % _collisions
-		+ "- Δv used: %.0f\n" % _ship.get_delta_v_used()
-		+ "- Asteroids: %d   Replans: %d\n" % [_asteroids.size(), _replans]
-		+ "- Planner: A* corridor + 3D DWA\n"
-		+ "- PlaceDist: %.1f m (Q/E)" % _place_distance_m
-	)
+	if _sim != null:
+		var clr := "n/a" if _sim.min_clearance == INF else "%.1f m" % _sim.min_clearance
+		_metrics_label.text = (
+			"Metrics:\n"
+			+ "- Status: %s\n" % _sim.status
+			+ "- Time: %.1f s\n" % _sim.time
+			+ "- Speed: %.1f m/s\n" % _sim.ship_vel.length()
+			+ "- Remaining: %.1f m\n" % _sim._remaining_path_distance()
+			+ "- Min clearance: %s\n" % clr
+			+ "- Collisions: %d\n" % _sim.collisions
+			+ "- Δv used: %.0f\n" % _sim.dv_used
+			+ "- Asteroids: %d   Replans: %d\n" % [_asteroids.size(), _sim.replans]
+			+ "- Planner: A* corridor + 3D DWA"
+		)
+	else:
+		var preview_len := 0.0
+		for i in range(1, _preview_path.size()):
+			preview_len += _preview_path[i - 1].distance_to(_preview_path[i])
+		_metrics_label.text = (
+			"Metrics (EDIT):\n"
+			+ "- Preview path: %.1f m\n" % preview_len
+			+ "- Asteroids: %d\n" % _asteroids.size()
+			+ "- Planner: A* corridor + 3D DWA\n"
+			+ "- PlaceDist: %.1f m (Q/E)" % _place_distance_m
+		)

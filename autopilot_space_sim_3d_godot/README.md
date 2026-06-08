@@ -59,7 +59,8 @@ bounce off the world bounds; their motion is kept exactly consistent with the
 | **RMB drag** | Orbit camera · **MMB drag** pan · **wheel** zoom |
 
 The **Inspector** edits the selected object's position, velocity, mass, and
-radius; **Apply to Selected** commits and re-plans.
+radius; **Apply to Selected** commits and re-plans. **Save / Load Scenario**
+buttons persist the whole setup (start, goal, asteroids, ship params) to JSON.
 
 ## Metrics (shown live during a run)
 
@@ -91,24 +92,50 @@ Ship limits (`mass_kg`, `max_thrust_n`, `max_speed_mps`, `target_speed_mps`,
 
 ## Architecture (files)
 
+The simulation is split into a **headless engine** (no scene/UI) and a **view**.
+This is what lets the interactive scene and the benchmark run *identical* logic.
+
 ```
 scripts/
-  Main.gd                 orchestrator: world, EDIT/RUN, replanning, metrics, UI
-  Ship.gd                 thrust-limited dynamics + path following (calls local planner)
-  Asteroid.gd             moving obstacle (constant velocity + wall bounce)
+  SimWorld.gd             HEADLESS ENGINE: owns ship+asteroid state, runs the
+                          closed loop (asteroid motion, A* replan, local planner,
+                          collision + metrics). Also scenario save/load + belt gen.
+  Main.gd                 VIEW/EDITOR: builds a SimWorld from the scene, steps it,
+                          syncs node visuals, handles editing/selection/save/load.
+  Ship.gd                 ship visual + design params (no logic)
+  Asteroid.gd             asteroid visual + design params (no logic)
   OrbitCameraRig.gd       camera
   planning/
     VoxelAStar.gd         global planner (3D grid A*)
     LocalPlanner3D.gd     reactive moving-obstacle avoidance (3D dynamic window)
     Predictor.gd          obstacle trajectory prediction (shared by both planners)
+tools/
+  BatchEval.gd            headless benchmark over N random scenarios
 ```
+
+## Benchmarking (headless)
+
+Run many randomized belts and report aggregate autopilot performance — use this
+after any change to check for regressions, or to compare planners later.
+
+```
+godot --headless --script res://tools/BatchEval.gd -- --runs 200 --asteroids 18 --seed 0
+godot --headless --script res://tools/BatchEval.gd -- --runs 100 --out res://eval_results.csv
+```
+
+Reports success / collision / timeout rates, min-clearance stats (worst / mean /
+p10), Δv (fuel) and time-to-goal. Deterministic per `--seed`. Example (30 belts
+of 18 moving asteroids): **96.7% success, 0 collisions, worst clearance 5.8 m**.
 
 ## Roadmap / ideas
 
+- [x] Scenario save/load (JSON) for repeatable benchmarks.
+- [x] Batch evaluation: run N random belts headless, report success / clearance / Δv.
+- Reduce NO_PATH cases: the global A* blocks predicted occupancy over several
+  future times, which can over-saturate dense belts. Inflate less / weight
+  near-term predictions.
 - Swept-volume collision in the global grid (currently samples discrete times).
 - Velocity-Obstacle / ORCA local planner as an alternative to the dynamic window.
 - Asteroid–asteroid collisions and rotation.
-- Scenario save/load (JSON) for repeatable benchmarks.
-- Batch evaluation: run N random belts headless, report success / clearance / Δv.
 - Optional learned controller (RL) trained in Python, compared against the
-  classical planner on the same scenarios.
+  classical planner on the same scenarios (BatchEval is the shared yardstick).
