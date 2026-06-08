@@ -79,7 +79,7 @@ anchor_bottom = 0.0
 offset_left = 12.0
 offset_top = 12.0
 offset_right = 420.0
-offset_bottom = 270.0
+offset_bottom = 360.0
 
 [node name="VBox" type="VBoxContainer" parent="UI/Panel"]
 
@@ -106,9 +106,9 @@ anchors_preset = 0
 anchor_right = 0.0
 anchor_bottom = 0.0
 offset_left = 12.0
-offset_top = 290.0
+offset_top = 375.0
 offset_right = 420.0
-offset_bottom = 560.0
+offset_bottom = 645.0
 
 [node name="InspectorVBox" type="VBoxContainer" parent="UI/Inspector"]
 

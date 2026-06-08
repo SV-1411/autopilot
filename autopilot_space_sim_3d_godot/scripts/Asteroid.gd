@@ -1,6 +1,10 @@
 extends Area3D
 class_name Asteroid
 
+# A moving obstacle. Travels at constant velocity and bounces off the world
+# bounds. Its motion is intentionally simple and deterministic so the autopilot's
+# Predictor can reproduce it exactly when planning ahead.
+
 @export var velocity: Vector3 = Vector3.ZERO
 @export var mass_kg: float = 1000.0
 @export var radius_m: float = 2.0
@@ -21,9 +25,20 @@ func _ready() -> void:
 	_highlight_material.emission_energy_multiplier = 2.0
 	_apply_radius()
 
-func step_sim(dt: float) -> void:
-	# Static obstacles - don't move
-	pass
+# Advance the asteroid by dt, reflecting its velocity at the world bounds.
+# This must stay consistent with Predictor.predict so look-ahead is accurate.
+func integrate(dt: float, bounds_min: Vector3, bounds_max: Vector3) -> void:
+	var p := global_position + velocity * dt
+	var v := velocity
+	for axis in range(3):
+		if p[axis] < bounds_min[axis]:
+			p[axis] = bounds_min[axis]
+			v[axis] = absf(v[axis])
+		elif p[axis] > bounds_max[axis]:
+			p[axis] = bounds_max[axis]
+			v[axis] = -absf(v[axis])
+	velocity = v
+	global_position = p
 
 func set_radius_m(r: float) -> void:
 	radius_m = max(0.25, r)

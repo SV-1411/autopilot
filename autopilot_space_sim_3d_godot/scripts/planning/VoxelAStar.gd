@@ -8,14 +8,14 @@ static func _heap_push(heap: Array, item: Dictionary) -> void:
 		var p := (i - 1) >> 1
 		if int(heap[p]["f"]) <= int(heap[i]["f"]):
 			break
-		var tmp := heap[p]
+		var tmp: Dictionary = heap[p]
 		heap[p] = heap[i]
 		heap[i] = tmp
 		i = p
 
 static func _heap_pop(heap: Array) -> Dictionary:
-	var out := heap[0]
-	var last := heap.pop_back()
+	var out: Dictionary = heap[0]
+	var last: Dictionary = heap.pop_back()
 	if heap.size() == 0:
 		return out
 	heap[0] = last
@@ -30,7 +30,7 @@ static func _heap_pop(heap: Array) -> Dictionary:
 			smallest = r
 		if int(heap[i]["f"]) <= int(heap[smallest]["f"]):
 			break
-		var tmp := heap[i]
+		var tmp: Dictionary = heap[i]
 		heap[i] = heap[smallest]
 		heap[smallest] = tmp
 		i = smallest

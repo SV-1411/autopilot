@@ -4,8 +4,7 @@
 
 [sub_resource type="SphereMesh" id=1]
 radius = 1.5
-height = 0.5
-is_hemisphere = true
+height = 3.0
 
 [sub_resource type="StandardMaterial3D" id=2]
 albedo_color = Color(1.0, 0.9, 0.3, 1)
