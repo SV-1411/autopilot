@@ -79,6 +79,13 @@ var _ghost_mesh_instance: MeshInstance3D
 # Realism controls (runtime-added like the save/load buttons).
 var _noise_spin: SpinBox
 var _unc_check: CheckBox
+var _belt_spin: SpinBox
+var _tspeed_spin: SpinBox
+var _thrust_spin: SpinBox
+
+# Thrust vector: where the autopilot is pushing right now, and how hard.
+var _thrust_line: ImmediateMesh
+var _thrust_inst: MeshInstance3D
 
 func _ready() -> void:
 	_rng.randomize()
@@ -96,7 +103,7 @@ func _ready() -> void:
 	_start_marker.global_position = _start_pos
 	_goal_marker.global_position = _goal_pos
 
-	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge up/down\nRMB drag: orbit cam   Wheel: zoom   MMB: pan"
+	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge up/down\nRMB drag: orbit cam   Wheel: zoom   MMB: pan\nWhile flying: Shift+LMB retargets the goal LIVE"
 
 	_setup_environment()
 	_setup_path_debug()
@@ -135,6 +142,35 @@ func _add_realism_controls() -> void:
 	_unc_check = CheckBox.new()
 	_unc_check.text = "Chance-constrained avoidance (3σ)"
 	_vbox.add_child(_unc_check)
+
+	_belt_spin = _add_spin_row("Belt size (B / G key)", 4, 400, 1, BELT_COUNT)
+	var ring_btn := Button.new()
+	ring_btn.text = "Ring crossing preset (G)"
+	ring_btn.pressed.connect(func(): _generate_ring(int(_belt_spin.value)))
+	_vbox.add_child(ring_btn)
+	_tspeed_spin = _add_spin_row("Ship target speed (m/s)", 20, 200, 5, 120)
+	_tspeed_spin.value_changed.connect(func(v: float):
+		_ship.target_speed_mps = v
+		_replan_preview())
+	_thrust_spin = _add_spin_row("Ship max thrust (kN)", 50, 1000, 25, 250)
+	_thrust_spin.value_changed.connect(func(v: float):
+		_ship.max_thrust_n = v * 1000.0
+		_replan_preview())
+
+func _add_spin_row(label_text: String, mn: float, mx: float, step: float, value: float) -> SpinBox:
+	var row := HBoxContainer.new()
+	var lab := Label.new()
+	lab.text = label_text
+	row.add_child(lab)
+	var spin := SpinBox.new()
+	spin.min_value = mn
+	spin.max_value = mx
+	spin.step = step
+	spin.value = value
+	spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(spin)
+	_vbox.add_child(row)
+	return spin
 
 func _setup_file_dialog() -> void:
 	_file_dialog = FileDialog.new()
@@ -242,6 +278,39 @@ func _setup_path_debug() -> void:
 	_ghost_mesh_instance.material_override = gm
 	add_child(_ghost_mesh_instance)
 
+	# Thrust vector: amber arrow from the ship along the commanded acceleration.
+	_thrust_line = ImmediateMesh.new()
+	_thrust_inst = MeshInstance3D.new()
+	_thrust_inst.mesh = _thrust_line
+	var tm := StandardMaterial3D.new()
+	tm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	tm.albedo_color = Color(1.0, 0.8, 0.1, 1.0)
+	_thrust_inst.material_override = tm
+	add_child(_thrust_inst)
+
+# Arrow from the ship showing the commanded thrust: length = fraction of max
+# acceleration (full deflection = 12 m), with a small 4-line arrowhead.
+func _draw_thrust(from: Vector3, accel: Vector3, amax: float) -> void:
+	_thrust_line.clear_surfaces()
+	var mag := accel.length()
+	if mag < 0.05 or amax <= 0.0:
+		return
+	var dir := accel / mag
+	var tip := from + dir * (12.0 * clampf(mag / amax, 0.0, 1.0))
+	var side := dir.cross(Vector3.UP)
+	if side.length() < 1e-3:
+		side = dir.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var up := dir.cross(side).normalized()
+	var back := tip - dir * 1.5
+	_thrust_line.surface_begin(Mesh.PRIMITIVE_LINES)
+	_thrust_line.surface_add_vertex(from)
+	_thrust_line.surface_add_vertex(tip)
+	for w in [side, -side, up, -up]:
+		_thrust_line.surface_add_vertex(tip)
+		_thrust_line.surface_add_vertex(back + w * 0.8)
+	_thrust_line.surface_end()
+
 # rocks: Array of {pos: Vector3, vel: Vector3} (sim dicts or editor snapshots).
 func _draw_ghosts(rocks: Array) -> void:
 	_ghost_line.clear_surfaces()
@@ -326,6 +395,7 @@ func _stop_run() -> void:
 			_asteroids[i].velocity = _restore_asteroids[i]["vel"]
 	_ship.global_position = _start_pos
 	_sim = null
+	_thrust_line.clear_surfaces()
 	_replan_preview()
 
 func _physics_process(dt: float) -> void:
@@ -341,6 +411,7 @@ func _physics_process(dt: float) -> void:
 		_asteroids[i].global_position = _sim.asteroids[i]["pos"]
 	_draw_path(_sim.path)
 	_draw_ghosts(_sim.asteroids)
+	_draw_thrust(_sim.ship_pos, _sim.last_accel, _sim.a_max())
 	_update_ui()
 
 	if _sim.is_terminal():
@@ -377,7 +448,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			_update_ui()
 			return
 		if k.keycode == KEY_B:
-			_generate_belt(BELT_COUNT)
+			_generate_belt(int(_belt_spin.value) if _belt_spin != null else BELT_COUNT)
+			return
+		if k.keycode == KEY_G:
+			_generate_ring(int(_belt_spin.value) if _belt_spin != null else 200)
 			return
 		if k.keycode == KEY_C:
 			_clear_asteroids()
@@ -419,6 +493,16 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _handle_click(event: InputEvent) -> void:
 	if _running:
+		# Mid-flight retargeting: Shift+LMB moves the goal while the ship flies.
+		# The next replan tick (<=1 s away) reroutes; the stale-path guard covers
+		# the gap. This is the live "change destination" test.
+		var me := event as InputEventMouseButton
+		if me != null and me.shift_pressed and _sim != null:
+			var p := _clamp_to_bounds(_point_under_mouse_3d())
+			_goal_pos = p
+			_goal_marker.global_position = p
+			_sim.goal_pos = p
+			return
 		return
 	var mouse_event := event as InputEventMouseButton
 	var shift_down := false
@@ -495,6 +579,23 @@ func _generate_belt(n: int) -> void:
 	var rocks := SimWorld.random_belt(n, _rng, _start_pos, _goal_pos, WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
 	for r in rocks:
 		_spawn_asteroid(r["pos"], r["vel"], r["radius"], r["mass"])
+	_select(null)
+	_replan_preview()
+
+# Ring-crossing preset: dense planar ring, ship forced to cross its plane --
+# start low outside the ring on one side, goal high on the opposite side.
+func _generate_ring(n: int) -> void:
+	if _running:
+		return
+	_clear_asteroids()
+	var rocks := SimWorld.ring_field(n, _rng, WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
+	for r in rocks:
+		_spawn_asteroid(r["pos"], r["vel"], r["radius"], r["mass"])
+	_start_pos = Vector3(-70, 6, -70)
+	_goal_pos = Vector3(70, 54, 70)
+	_ship.global_position = _start_pos
+	_start_marker.global_position = _start_pos
+	_goal_marker.global_position = _goal_pos
 	_select(null)
 	_replan_preview()
 
@@ -653,6 +754,9 @@ func _update_ui() -> void:
 			+ "- Status: %s\n" % _sim.status
 			+ "- Time: %.1f s\n" % _sim.time
 			+ "- Speed: %.1f m/s\n" % _sim.ship_vel.length()
+			+ "- Thrust: %.1f m/s² (%d%% of max)\n" % [
+				_sim.last_accel.length(),
+				int(100.0 * _sim.last_accel.length() / maxf(0.01, _sim.a_max()))]
 			+ "- Remaining: %.1f m\n" % _sim._remaining_path_distance()
 			+ "- Min clearance: %s\n" % clr
 			+ "- Collisions: %d\n" % _sim.collisions

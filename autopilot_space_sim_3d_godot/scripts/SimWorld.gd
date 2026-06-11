@@ -106,6 +106,10 @@ var rec_dt := 0.1               # seconds between captured frames
 var recording := {}
 var _rec_timer := 0.0
 
+# Commanded acceleration this tick (telemetry: lets the view draw the thrust
+# vector -- where the autopilot is pushing and how hard).
+var last_accel := Vector3.ZERO
+
 func a_max() -> float:
 	return ship_max_thrust / maxf(1.0, ship_mass)
 
@@ -391,6 +395,7 @@ func _apply_accel(accel: Vector3, dt: float) -> void:
 	var am := a_max()
 	if accel.length() > am:
 		accel = accel.normalized() * am
+	last_accel = accel
 	# Charge Δv for the velocity change actually achieved -- thrust spent on
 	# pushing past the speed cap is clipped, not delivered, and a reported fuel
 	# metric must not overcount.
@@ -404,8 +409,10 @@ func _apply_accel(accel: Vector3, dt: float) -> void:
 func _brake(dt: float) -> void:
 	if ship_vel.length() < 1e-3:
 		ship_vel = Vector3.ZERO
+		last_accel = Vector3.ZERO
 		return
 	var am := a_max()
+	last_accel = -ship_vel.normalized() * am
 	var v_before := ship_vel
 	var dv := -ship_vel.normalized() * am * dt
 	if dv.length() >= ship_vel.length():
@@ -661,6 +668,33 @@ static func random_belt(count: int, rng: RandomNumberGenerator,
 			"radius": radius,
 			"mass": radius * 500.0,
 		})
+	return rocks
+
+# Saturn-ring style field: an annulus of rocks in the XZ mid-plane with
+# tangential (orbit-like) motion -- inner rocks faster (Keplerian flavor),
+# small velocity jitter, thin vertical spread. Crossing it is the classic
+# ring-plane-crossing problem: there is no permanently empty corridor, the
+# ship has to thread a gap in TIME.
+static func ring_field(count: int, rng: RandomNumberGenerator,
+		bmin: Vector3, bmax: Vector3) -> Array[Dictionary]:
+	var rocks: Array[Dictionary] = []
+	var cx := (bmin.x + bmax.x) * 0.5
+	var cz := (bmin.z + bmax.z) * 0.5
+	var cy := (bmin.y + bmax.y) * 0.5
+	var r_in := 28.0
+	var r_out := minf(bmax.x - cx, bmax.z - cz) - 4.0
+	for i in range(count):
+		# sqrt -> uniform density by ring area, not bunched at the centre
+		var r := sqrt(rng.randf_range(r_in * r_in, r_out * r_out))
+		var th := rng.randf_range(0.0, TAU)
+		var pos := Vector3(cx + r * cos(th), cy + rng.randfn(0.0, 3.0), cz + r * sin(th))
+		pos.y = clampf(pos.y, bmin.y + 3.0, bmax.y - 3.0)
+		var tangent := Vector3(-sin(th), 0.0, cos(th))
+		var speed := 16.0 * sqrt(r_in / r)
+		var vel := tangent * speed + Vector3(
+			rng.randfn(0.0, 0.4), rng.randfn(0.0, 0.3), rng.randfn(0.0, 0.4))
+		var radius := rng.randf_range(1.0, 3.0)
+		rocks.append({"pos": pos, "vel": vel, "radius": radius, "mass": radius * 500.0})
 	return rocks
 
 # ============================================================ vector <-> array

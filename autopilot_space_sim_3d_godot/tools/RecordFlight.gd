@@ -12,6 +12,7 @@ extends SceneTree
 #
 # Args (all optional):
 #   --asteroids N --seed N --max-time S --noise SIGMA --uncertainty --out PATH
+#   --ring    (Saturn-ring crossing preset instead of a random belt)
 
 const SimWorldScript := preload("res://scripts/SimWorld.gd")
 
@@ -25,10 +26,11 @@ func _init() -> void:
 	var unc := args.has("uncertainty")
 	var out_path := str(args.get("out", "res://last_flight.json"))
 
+	var ring := args.has("ring")
 	var bmin := Vector3(-90, 0, -90)
 	var bmax := Vector3(90, 60, 90)
-	var start := Vector3(-60, 10, -60)
-	var goal := Vector3(60, 10, 60)
+	var start := Vector3(-70, 6, -70) if ring else Vector3(-60, 10, -60)
+	var goal := Vector3(70, 54, 70) if ring else Vector3(60, 10, 60)
 
 	var rng := RandomNumberGenerator.new()
 	rng.seed = seed_v
@@ -39,7 +41,8 @@ func _init() -> void:
 	sim.start_pos = start
 	sim.goal_pos = goal
 	sim.max_time = max_time
-	sim.asteroids = SimWorld.random_belt(n_ast, rng, start, goal, bmin, bmax)
+	sim.asteroids = SimWorld.ring_field(n_ast, rng, bmin, bmax) if ring \
+		else SimWorld.random_belt(n_ast, rng, start, goal, bmin, bmax)
 	sim.seed_value = seed_v + 1
 	sim.noise_sigma = noise
 	if unc:
@@ -62,6 +65,10 @@ func _init() -> void:
 			sim.status, sim.time,
 			(sim.recording["frames"] as Array).size(),
 			(sim.recording["paths"] as Array).size()])
+		print("clearance=%.2f m  dv=%.0f  replans=%d  plan mean=%.1f ms max=%.1f ms  fails=%d  degraded=%s" % [
+			(0.0 if sim.min_clearance == INF else sim.min_clearance), sim.dv_used, sim.replans,
+			(sim.plan_ms_total / maxf(1.0, float(sim.plan_count))), sim.plan_ms_max,
+			sim.plan_fail_count, str(sim.degraded)])
 		print("Recording saved: ", ProjectSettings.globalize_path(out_path))
 		quit(0)
 	else:
