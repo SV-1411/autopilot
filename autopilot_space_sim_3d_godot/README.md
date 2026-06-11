@@ -14,22 +14,45 @@ is `scenes/Main.tscn`).
 
 The guidance system has two layers, exactly like real robot/vehicle autopilots:
 
-1. **Global planner — Voxel A\*** (`scripts/planning/VoxelAStar.gd`)
+1. **Global planner — time-indexed A\*** (`scripts/planning/SpaceTimeAStar.gd`)
    Searches a 3D voxel grid for a coarse, collision-free *corridor* from the
-   ship to the goal. It runs against a **predicted occupancy grid**: each
-   asteroid's future positions (sampled over the next ~2 s) are stamped into the
-   grid, so the corridor already leans away from where the rocks are heading.
-   Re-runs every `REPLAN_INTERVAL_S` (1 s).
+   ship to the goal — but checks each cell's occupancy **at the time the ship
+   would arrive there**, not "ever". Predicted occupancy is built as a stack of
+   time layers (one per 0.2 s, sphere-stamped, optionally inflated by a k·σ
+   uncertainty shell); a node reached at path cost g maps to the layer at
+   t = g · (voxel / cruise speed). This threads gaps that close later and
+   crosses cells that clear before arrival — the legacy "union" model (kept as
+   a benchmark canary, `scripts/planning/VoxelAStar.gd`) falsely refused ~7% of
+   dense belts. All-integer packed-heap search, hard per-replan time budget
+   (`plan_deadline_usec`); on failure the previous path is validated against
+   fresh predictions and truncated, or guidance degrades to local-only mode
+   (surfaced via the `degraded` flag). Re-runs every `replan_interval` (1 s).
 
 2. **Local planner — 3D Dynamic Window** (`scripts/planning/LocalPlanner3D.gd`)
    The reactive "brain". Every physics tick it:
    - samples thrust commands the ship can physically apply (limited by
      `max_thrust / mass` and top speed),
    - rolls each candidate forward over a short horizon **while predicting where
-     every asteroid will be** (`scripts/planning/Predictor.gd`),
-   - rejects any predicted collision and scores the rest on
+     every asteroid will be** (`scripts/planning/Predictor.gd`), culling
+     obstacles that cannot physically interact within the horizon,
+   - rejects any predicted collision using **swept checks** (closest approach of
+     the relative-motion segment — tunneling through a rock between samples is
+     impossible at any speed) and scores the rest on
      **progress + clearance + speed + fuel (Δv)**,
-   - applies the lowest-cost thrust.
+   - applies the lowest-cost thrust; if *every* candidate is doomed, it flies
+     the **least-bad maneuver** (greatest closest-approach) rather than blindly
+     braking into a pursuer.
+
+   **Chance-constrained mode** (`unc_enable`): each obstacle's effective radius
+   grows by `k·(σ₀ + growth·t)` over the look-ahead, keeping the ship outside
+   the k-sigma uncertainty shell — the same principle operational conjunction
+   avoidance uses. Pair with process noise (`noise_sigma`, applied √dt-scaled to
+   asteroid velocities) to simulate imperfect tracking.
+
+   Ground truth uses the same swept collision math (`SimWorld._update_metrics`),
+   and the asteroid integrator delegates to `Predictor.advance` so simulated
+   truth and the planners' predictions share one reflection law by construction
+   (pinned by the `predictor_equals_integrator` self-test).
 
    This is what makes the ship *dodge moving asteroids* rather than just follow a
    line. It is fully classical and explainable — no trained model required.
@@ -98,44 +121,86 @@ This is what lets the interactive scene and the benchmark run *identical* logic.
 ```
 scripts/
   SimWorld.gd             HEADLESS ENGINE: owns ship+asteroid state, runs the
-                          closed loop (asteroid motion, A* replan, local planner,
-                          collision + metrics). Also scenario save/load + belt gen.
+                          closed loop (asteroid motion, replan, local planner,
+                          swept collision + metrics, stale-path guard, planner
+                          telemetry). Also scenario save/load (schema v2) + belt gen.
   Main.gd                 VIEW/EDITOR: builds a SimWorld from the scene, steps it,
-                          syncs node visuals, handles editing/selection/save/load.
+                          syncs node visuals, draws the corridor + predicted
+                          asteroid ghost trails, realism controls, telemetry HUD.
   Ship.gd                 ship visual + design params (no logic)
   Asteroid.gd             asteroid visual + design params (no logic)
   OrbitCameraRig.gd       camera
   planning/
-    VoxelAStar.gd         global planner (3D grid A*)
-    LocalPlanner3D.gd     reactive moving-obstacle avoidance (3D dynamic window)
-    Predictor.gd          obstacle trajectory prediction (shared by both planners)
+    SpaceTimeAStar.gd     global planner (time-indexed weighted A*, packed-heap)
+    VoxelAStar.gd         legacy union-grid A* (benchmark canary)
+    LocalPlanner3D.gd     reactive moving-obstacle avoidance (3D dynamic window,
+                          swept checks, chance constraints, least-bad fallback)
+    Predictor.gd          obstacle trajectory prediction AND integration
+                          (one reflection law for truth + prediction)
 tools/
-  BatchEval.gd            headless benchmark over N random scenarios
+  run_headless.ps1        fail-fast runner (import gate, boot sentinel, timeout,
+                          real exit codes) -- use this for everything below
+  SelfTest.gd             invariant test suite (13 deterministic scenarios)
+  BatchEval.gd            headless benchmark: gates, failure dumps, replay,
+                          noise/uncertainty knobs, planner A/B canary
 ```
 
-## Benchmarking (headless)
+## Testing & benchmarking (headless)
 
-Run many randomized belts and report aggregate autopilot performance — use this
-after any change to check for regressions, or to compare planners later.
+**Always run headless tools through the fail-fast wrapper** — it re-imports the
+project first (a `class_name` script added without re-import makes headless runs
+hang silently), requires a boot sentinel, applies a hard timeout, and propagates
+real exit codes:
 
+```powershell
+# Invariant test suite (13 deterministic scenarios; exit 1 on any failure):
+& tools\run_headless.ps1 -Script res://tools/SelfTest.gd
+
+# Benchmark: many randomized belts, aggregate stats:
+& tools\run_headless.ps1 -Script res://tools/BatchEval.gd `
+    -ToolArgs "--runs 60 --asteroids 26 --seed 0"
+
+# Regression-gated run (nonzero exit on violation), with failure dumps:
+& tools\run_headless.ps1 -Script res://tools/BatchEval.gd `
+    -ToolArgs "--runs 60 --asteroids 26 --seed 0 --gate-success 95 --gate-collisions 0 --gate-nopath 2 --dump-failures res://eval_failures"
+
+# Replay one dumped failure with full detail (exit 0 iff it now arrives):
+& tools\run_headless.ps1 -Script res://tools/BatchEval.gd `
+    -ToolArgs "--replay res://eval_failures/fail_007_COLLISION.json"
+
+# Realism: process noise + chance-constrained avoidance:
+& tools\run_headless.ps1 -Script res://tools/BatchEval.gd `
+    -ToolArgs "--runs 60 --asteroids 26 --noise 0.5 --uncertainty"
+
+# Legacy-planner canary (must reproduce the old ~7% false NO_PATH rate):
+& tools\run_headless.ps1 -Script res://tools/BatchEval.gd `
+    -ToolArgs "--runs 60 --asteroids 26 --planner union"
 ```
-godot --headless --script res://tools/BatchEval.gd -- --runs 200 --asteroids 18 --seed 0
-godot --headless --script res://tools/BatchEval.gd -- --runs 100 --out res://eval_results.csv
-```
 
-Reports success / collision / timeout rates, min-clearance stats (worst / mean /
-p10), Δv (fuel) and time-to-goal. Deterministic per `--seed`. Example (30 belts
-of 18 moving asteroids): **96.7% success, 0 collisions, worst clearance 5.8 m**.
+Reports success / collision / timeout / NO_PATH rates, min-clearance stats
+(worst / mean / p10, measured with swept closest-approach), Δv (fuel),
+time-to-goal, and planner telemetry (replan ms, failures, degraded runs).
+Deterministic per `--seed`. Scenario JSON (schema v2) carries bounds, noise,
+seed, and uncertainty config so dumps replay faithfully.
+
+Reference result (60 belts of 26 moving asteroids, seed 0, time-indexed
+planner): **100% success, 0 collisions, 0 false refusals** — the legacy union
+planner scores 93.3% with 6.7% NO_PATH on the identical belts.
 
 ## Roadmap / ideas
 
-- [x] Scenario save/load (JSON) for repeatable benchmarks.
+- [x] Scenario save/load (JSON, schema v2) for repeatable benchmarks.
 - [x] Batch evaluation: run N random belts headless, report success / clearance / Δv.
-- Reduce NO_PATH cases: the global A* blocks predicted occupancy over several
-  future times, which can over-saturate dense belts. Inflate less / weight
-  near-term predictions.
-- Swept-volume collision in the global grid (currently samples discrete times).
+- [x] Reduce NO_PATH cases — time-indexed occupancy + sphere stamping eliminated
+  the false refusals (6.7% → 0% on the 26-asteroid reference config).
+- [x] Swept (tunneling-free) collision in the local planner AND ground truth.
+- [x] Uncertainty: process noise + chance-constrained (k·σ) avoidance.
+- [x] Invariant self-test suite + fail-fast headless toolchain + benchmark gates.
+- Inter-layer sweep stamping in the global grid (layers sample instants; the
+  swept local planner is the safety net in between).
 - Velocity-Obstacle / ORCA local planner as an alternative to the dynamic window.
 - Asteroid–asteroid collisions and rotation.
+- SI/Keplerian dynamics, sensor-limited perception (range/FOV + tracking filter),
+  Monte-Carlo collision-probability reporting — the path to ops-grade realism.
 - Optional learned controller (RL) trained in Python, compared against the
   classical planner on the same scenarios (BatchEval is the shared yardstick).

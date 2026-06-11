@@ -21,6 +21,29 @@ static func predict(pos: Vector3, vel: Vector3, t: float,
 		_reflect_axis(pos.z, vel.z, t, bounds_min.z, bounds_max.z)
 	)
 
+# Advance an obstacle by dt with exact wall reflection, returning {pos, vel}.
+# SimWorld's integrator MUST use this so simulated truth and predicted future
+# stay identical (clamping at the wall instead of reflecting loses the overshoot
+# and silently drifts truth away from prediction, bounce after bounce).
+static func advance(pos: Vector3, vel: Vector3, dt: float,
+		bounds_min: Vector3, bounds_max: Vector3) -> Dictionary:
+	var p := pos + vel * dt
+	var v := vel
+	for axis in range(3):
+		var lo := bounds_min[axis]
+		var hi := bounds_max[axis]
+		if hi <= lo:
+			p[axis] = clampf(p[axis], lo, hi)
+			continue
+		# Fold the overshoot back into the box; each fold flips direction.
+		while p[axis] < lo or p[axis] > hi:
+			if p[axis] < lo:
+				p[axis] = 2.0 * lo - p[axis]
+			else:
+				p[axis] = 2.0 * hi - p[axis]
+			v[axis] = -v[axis]
+	return {"pos": p, "vel": v}
+
 static func _reflect_axis(p0: float, v: float, t: float, lo: float, hi: float) -> float:
 	if hi <= lo:
 		return clampf(p0, lo, hi)

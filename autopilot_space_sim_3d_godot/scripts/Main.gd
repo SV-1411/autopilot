@@ -73,6 +73,12 @@ var _file_mode := ""   # "save" or "load"
 
 var _path_line: ImmediateMesh
 var _path_mesh_instance: MeshInstance3D
+var _ghost_line: ImmediateMesh
+var _ghost_mesh_instance: MeshInstance3D
+
+# Realism controls (runtime-added like the save/load buttons).
+var _noise_spin: SpinBox
+var _unc_check: CheckBox
 
 func _ready() -> void:
 	_rng.randomize()
@@ -81,6 +87,7 @@ func _ready() -> void:
 	_apply_button.pressed.connect(_apply_inspector_to_selected)
 
 	_add_save_load_buttons()
+	_add_realism_controls()
 	_setup_file_dialog()
 
 	_ship = ship_scene.instantiate() as Ship
@@ -105,6 +112,26 @@ func _add_save_load_buttons() -> void:
 	load_btn.pressed.connect(_on_load_pressed)
 	_vbox.add_child(load_btn)
 
+# Process-noise + chance-constraint controls, so the realism modes the
+# benchmark exercises are also flyable interactively.
+func _add_realism_controls() -> void:
+	var noise_row := HBoxContainer.new()
+	var noise_label := Label.new()
+	noise_label.text = "Noise σ (m/s²)"
+	noise_row.add_child(noise_label)
+	_noise_spin = SpinBox.new()
+	_noise_spin.min_value = 0.0
+	_noise_spin.max_value = 5.0
+	_noise_spin.step = 0.1
+	_noise_spin.value = 0.0
+	_noise_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	noise_row.add_child(_noise_spin)
+	_vbox.add_child(noise_row)
+
+	_unc_check = CheckBox.new()
+	_unc_check.text = "Chance-constrained avoidance (3σ)"
+	_vbox.add_child(_unc_check)
+
 func _setup_file_dialog() -> void:
 	_file_dialog = FileDialog.new()
 	_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -122,6 +149,34 @@ func _setup_path_debug() -> void:
 	_path_mesh_instance.material_override.albedo_color = Color(0.1, 1.0, 0.5, 1.0)
 	add_child(_path_mesh_instance)
 
+	# Ghost trails: where the autopilot PREDICTS each asteroid will be over the
+	# next few seconds -- the planner's mental model, made visible.
+	_ghost_line = ImmediateMesh.new()
+	_ghost_mesh_instance = MeshInstance3D.new()
+	_ghost_mesh_instance.mesh = _ghost_line
+	var gm := StandardMaterial3D.new()
+	gm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	gm.albedo_color = Color(1.0, 0.55, 0.15, 0.45)
+	_ghost_mesh_instance.material_override = gm
+	add_child(_ghost_mesh_instance)
+
+# rocks: Array of {pos: Vector3, vel: Vector3} (sim dicts or editor snapshots).
+func _draw_ghosts(rocks: Array) -> void:
+	_ghost_line.clear_surfaces()
+	if rocks.is_empty():
+		return
+	_ghost_line.surface_begin(Mesh.PRIMITIVE_LINES)
+	for r in rocks:
+		var prev: Vector3 = r["pos"]
+		for k in range(1, 7):
+			var t := float(k) * 0.5
+			var p: Vector3 = Predictor.predict(r["pos"], r["vel"], t, WORLD_BOUNDS_MIN, WORLD_BOUNDS_MAX)
+			_ghost_line.surface_add_vertex(prev)
+			_ghost_line.surface_add_vertex(p)
+			prev = p
+	_ghost_line.surface_end()
+
 # ============================================================ build / sync sim
 # Build a SimWorld from the current editable scene.
 func _build_sim() -> SimWorld:
@@ -136,6 +191,13 @@ func _build_sim() -> SimWorld:
 	sim.ship_max_speed = _ship.max_speed_mps
 	sim.ship_target_speed = _ship.target_speed_mps
 	sim.planner_cfg = _ship.planner_cfg
+	if _noise_spin != null:
+		sim.noise_sigma = _noise_spin.value
+	if _unc_check != null and _unc_check.button_pressed:
+		sim.unc_enable = true
+		sim.unc_sigma0 = 0.5
+		sim.unc_growth = 1.5 * sim.noise_sigma
+		sim.unc_ksigma = 3.0
 	var rocks: Array[Dictionary] = []
 	for a in _asteroids:
 		rocks.append({"pos": a.global_position, "vel": a.velocity, "radius": a.radius_m, "mass": a.mass_kg})
@@ -149,6 +211,10 @@ func _replan_preview() -> void:
 	sim.plan_path()
 	_preview_path = sim.path
 	_draw_path(_preview_path)
+	var rocks: Array = []
+	for a in _asteroids:
+		rocks.append({"pos": a.global_position, "vel": a.velocity})
+	_draw_ghosts(rocks)
 	_update_ui()
 
 # ============================================================ run lifecycle
@@ -192,6 +258,7 @@ func _physics_process(dt: float) -> void:
 	for i in range(min(_asteroids.size(), _sim.asteroids.size())):
 		_asteroids[i].global_position = _sim.asteroids[i]["pos"]
 	_draw_path(_sim.path)
+	_draw_ghosts(_sim.asteroids)
 	_update_ui()
 
 	if _sim.is_terminal():
@@ -499,7 +566,10 @@ func _update_ui() -> void:
 			+ "- Collisions: %d\n" % _sim.collisions
 			+ "- Δv used: %.0f\n" % _sim.dv_used
 			+ "- Asteroids: %d   Replans: %d\n" % [_asteroids.size(), _sim.replans]
-			+ "- Planner: A* corridor + 3D DWA"
+			+ "- Plan: %.1f ms (max %.1f)   fails: %d%s\n" % [
+				_sim.plan_ms_last, _sim.plan_ms_max, _sim.plan_fail_count,
+				"   ⚠ DEGRADED" if _sim.degraded else ""]
+			+ "- Planner: time-indexed A* + 3D DWA (swept)"
 		)
 	else:
 		var preview_len := 0.0
@@ -509,6 +579,6 @@ func _update_ui() -> void:
 			"Metrics (EDIT):\n"
 			+ "- Preview path: %.1f m\n" % preview_len
 			+ "- Asteroids: %d\n" % _asteroids.size()
-			+ "- Planner: A* corridor + 3D DWA\n"
+			+ "- Planner: time-indexed A* + 3D DWA (swept)\n"
 			+ "- PlaceDist: %.1f m (Q/E)" % _place_distance_m
 		)

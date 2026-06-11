@@ -17,6 +17,11 @@ eval/
 # Simulation output
 trajectory_log.csv
 
+# Benchmark outputs (regenerable; CSVs in the project dir also spawn Godot
+# .translation/.import artifacts)
+autopilot_space_sim_3d_godot/eval_*
+autopilot_space_sim_3d_godot/*.translation
+
 # Godot
 autopilot_space_sim_3d_godot/.godot/
 

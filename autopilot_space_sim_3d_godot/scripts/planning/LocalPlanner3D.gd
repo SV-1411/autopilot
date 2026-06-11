@@ -39,6 +39,17 @@ const DEFAULT_CFG := {
 	"w_clear": 150.0,      # weight: penalty for getting within safe_margin
 	"w_effort": 0.4,       # weight: penalty on thrust magnitude (fuel)
 	"w_speed_cap": 5.0,    # weight: penalty for exceeding the safe arrival speed
+	# --- uncertainty / chance constraint --------------------------------------
+	# Real obstacle tracks are never exact. We model each obstacle's predicted
+	# position as a Gaussian whose 1-sigma radius grows with look-ahead time:
+	#     sigma(t) = unc_sigma0 + unc_growth * t
+	# and require the ship to stay outside the unc_ksigma-sigma shell. Keeping
+	# clear of the k-sigma shell bounds the collision probability (k=3 ~ Pc<1e-2
+	# per axis), which is exactly how operational conjunction avoidance works.
+	"unc_enable": false,   # off by default -> identical to the deterministic planner
+	"unc_sigma0": 0.0,     # baseline 1-sigma position uncertainty at t=0 (m)
+	"unc_growth": 0.0,     # 1-sigma growth rate (m per second of look-ahead)
+	"unc_ksigma": 3.0,     # safety shells of sigma to keep clear (higher = safer)
 }
 
 # obstacles: Array of { "pos": Vector3, "vel": Vector3, "radius": float }
@@ -76,12 +87,30 @@ static func plan(
 	# across all candidates (the prediction doesn't depend on the ship's choice).
 	# This is the key performance optimisation -- without it the predictor runs
 	# once per candidate per step, ~50x more work.
+	# Cull obstacles that cannot possibly interact within the horizon: worst-case
+	# closing speed is the ship's best achievable speed plus the obstacle's own.
+	# The swept check costs per-obstacle-per-step-per-candidate, so in crowded
+	# scenes this is the difference between a guidance tick and a stall.
+	var horizon_s := float(c["horizon"])
+	var vmax_eff := minf(v_max, ship_vel.length() + a_max * float(c["ctrl_dt"]))
+	var near: Array = []
+	for obs in obstacles:
+		var closing := vmax_eff + (obs["vel"] as Vector3).length()
+		var gap := ship_pos.distance_to(obs["pos"]) - float(obs["radius"]) - ship_radius
+		if gap <= closing * horizon_s + margin:
+			near.append(obs)
+
 	var sim_dt := float(c["sim_dt"])
-	var steps := int(ceil(float(c["horizon"]) / sim_dt))
-	var predicted := _predict_frames(obstacles, steps, sim_dt, bounds_min, bounds_max)
+	var steps := int(ceil(horizon_s / sim_dt))
+	var predicted := _predict_frames(near, steps, sim_dt, bounds_min, bounds_max,
+		bool(c["unc_enable"]), float(c["unc_sigma0"]), float(c["unc_growth"]), float(c["unc_ksigma"]))
 
 	var best_cost := INF
 	var best_accel := Vector3.ZERO
+	# Least-bad emergency option: among candidates predicted to collide, the one
+	# with the greatest closest-approach (i.e. the shallowest, latest contact).
+	var doomed_best_clear := -INF
+	var doomed_best_accel := Vector3.ZERO
 
 	for accel in candidates:
 		# Velocity the ship would carry into the look-ahead after this thrust.
@@ -91,6 +120,9 @@ static func plan(
 
 		var result := _simulate(ship_pos, cand_v, predicted, ship_radius, sim_dt, steps)
 		if result["collides"]:
+			if float(result["min_clear"]) > doomed_best_clear:
+				doomed_best_clear = float(result["min_clear"])
+				doomed_best_accel = accel
 			continue
 
 		var end_pos: Vector3 = result["end_pos"]
@@ -124,13 +156,13 @@ static func plan(
 			best_cost = cost
 			best_accel = accel
 
-	# If every candidate was predicted to collide, brake hard along -velocity:
-	# decelerating buys time and is the safest fallback.
+	# If every candidate was predicted to collide, fly the least-bad one: the
+	# maneuver with the greatest closest-approach distance. The hard brake is
+	# always among the candidates, so it is chosen exactly when braking really is
+	# the safest reaction -- but a lateral dodge that nearly clears beats braking
+	# straight into a pursuing rock.
 	if best_cost == INF:
-		if ship_vel.length() > 1e-3:
-			best_accel = -ship_vel.normalized() * a_max
-		else:
-			best_accel = Vector3.ZERO
+		best_accel = doomed_best_accel
 
 	return best_accel
 
@@ -138,26 +170,42 @@ static func plan(
 # Returns Array[step] -> Array of { "p": Vector3, "sr": float } where sr is the
 # pre-summed collision radius offset is handled by the caller (ship_radius).
 static func _predict_frames(obstacles: Array, steps: int, dt: float,
-		bounds_min: Vector3, bounds_max: Vector3) -> Array:
+		bounds_min: Vector3, bounds_max: Vector3,
+		unc_enable: bool, sigma0: float, growth: float, ksigma: float) -> Array:
+	# frames[i] holds positions at t = i*dt (frame 0 = now), so _simulate can check
+	# the SEGMENT of motion between consecutive frames instead of just the
+	# endpoints. Endpoint-only checks tunnel: at cruise speed the ship covers far
+	# more ground per step than a collision sphere is wide.
 	var frames: Array = []
-	var t := 0.0
-	for s in range(steps):
-		t += dt
+	for s in range(steps + 1):
+		var t := float(s) * dt
+		# Uncertainty shell at this look-ahead time, folded into the obstacle
+		# radius so the existing collision/clearance maths enforces the chance
+		# constraint with no extra cost.
+		var infl := 0.0
+		if unc_enable:
+			infl = ksigma * (sigma0 + growth * t)
 		var frame: Array = []
 		for obs in obstacles:
 			frame.append({
 				"p": Predictor.predict(obs["pos"], obs["vel"], t, bounds_min, bounds_max),
-				"r": float(obs["radius"]),
+				"r": float(obs["radius"]) + infl,
 			})
 		frames.append(frame)
 	return frames
 
 # Roll the ship (constant cand_v) forward against precomputed obstacle frames;
 # return whether a collision is predicted, the closest approach, and end pos.
+#
+# SWEPT CHECK: ship and obstacles both move linearly within a step, so their
+# relative motion is a straight segment. The true closest approach during the
+# step is the distance from that segment to the origin -- checking it (instead of
+# only the step endpoints) makes tunneling through a rock between samples
+# impossible, at any speed.
 static func _simulate(
 		start_pos: Vector3,
 		cand_v: Vector3,
-		predicted: Array,
+		predicted: Array,   # frames at t = 0..steps (from _predict_frames)
 		ship_radius: float,
 		dt: float,
 		steps: int
@@ -165,16 +213,35 @@ static func _simulate(
 	var p := start_pos
 	var min_clear := INF
 
-	for s in range(steps):
-		p += cand_v * dt
-		for o in predicted[s]:
-			var d: float = p.distance_to(o["p"]) - (ship_radius + float(o["r"]))
+	for s in range(1, steps + 1):
+		var p_next := p + cand_v * dt
+		var prev_frame: Array = predicted[s - 1]
+		var cur_frame: Array = predicted[s]
+		for j in range(cur_frame.size()):
+			var o_prev: Dictionary = prev_frame[j]
+			var o_cur: Dictionary = cur_frame[j]
+			# Relative ship-minus-obstacle positions at the step's ends; closest
+			# approach in between is the segment-to-origin distance.
+			var a: Vector3 = p - o_prev["p"]
+			var b: Vector3 = p_next - o_cur["p"]
+			var hit_r: float = ship_radius + maxf(float(o_prev["r"]), float(o_cur["r"]))
+			var d := _seg_origin_dist(a, b) - hit_r
 			if d < min_clear:
 				min_clear = d
 			if d <= 0.0:
-				return {"collides": true, "min_clear": d, "end_pos": p}
+				return {"collides": true, "min_clear": d, "end_pos": p_next}
+		p = p_next
 
 	return {"collides": false, "min_clear": min_clear, "end_pos": p}
+
+# Minimum distance from the segment a->b to the origin.
+static func _seg_origin_dist(a: Vector3, b: Vector3) -> float:
+	var ab := b - a
+	var denom := ab.length_squared()
+	if denom <= 1e-12:
+		return a.length()
+	var t := clampf(-a.dot(ab) / denom, 0.0, 1.0)
+	return (a + ab * t).length()
 
 static func _candidate_accelerations(
 		ship_pos: Vector3,
