@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Autopilot Flight Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #06080f; color: #cfd6e6; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+  #c { position: fixed; inset: 0; }
+  .panel {
+    position: fixed; background: rgba(13,18,32,.88); border: 1px solid #2a3550;
+    border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(6px); font-size: 13px;
+  }
+  #top { top: 12px; left: 12px; max-width: 360px; }
+  #top h1 { font-size: 15px; color: #7fd4ff; margin-bottom: 6px; }
+  #top .hint { color: #8a93a8; font-size: 12px; line-height: 1.5; }
+  #legend { top: 12px; right: 12px; line-height: 1.7; font-size: 12px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  #explain {
+    bottom: 86px; left: 12px; max-width: 420px; font-size: 12px; line-height: 1.5;
+    color: #b8c2d8; border-color: #3a4a72;
+  }
+  #explain b { color: #7fd4ff; }
+  #bar {
+    bottom: 12px; left: 12px; right: 12px; display: flex; align-items: center; gap: 12px;
+  }
+  #bar button, #bar select, #bar label {
+    background: #1a2440; color: #cfd6e6; border: 1px solid #33416b; border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  #bar button:hover { background: #243259; }
+  #scrub { flex: 1; accent-color: #36d399; }
+  #time { min-width: 130px; font-variant-numeric: tabular-nums; }
+  #status { min-width: 200px; color: #36d399; font-weight: 600; }
+  #file { display: none; }
+  #drop {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(6,8,15,.92); z-index: 10; flex-direction: column; gap: 14px;
+  }
+  #drop .box {
+    border: 2px dashed #33416b; border-radius: 16px; padding: 60px 80px; text-align: center;
+    color: #8a93a8; font-size: 15px; line-height: 1.8;
+  }
+  #drop .box b { color: #7fd4ff; font-size: 18px; }
+  #drop button {
+    background: #36d399; color: #06251a; border: 0; border-radius: 8px;
+    padding: 12px 28px; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="drop">
+  <div class="box">
+    <b>Autopilot Flight Viewer</b><br>
+    Drop a <code>last_flight.json</code> here, or
+  </div>
+  <button onclick="document.getElementById('file').click()">Choose flight recording…</button>
+  <div style="color:#5a647d;font-size:12px">Recordings are saved automatically after every run in the Godot sim,<br>
+  or via: <code>tools\run_headless.ps1 -Script res://tools/RecordFlight.gd</code></div>
+</div>
+<input type="file" id="file" accept=".json">
+
+<div id="top" class="panel hidden">
+  <h1>AUTOPILOT FLIGHT REPLAY</h1>
+  <div class="hint" id="meta"></div>
+  <div class="hint" style="margin-top:6px">Drag: orbit &nbsp; Wheel: zoom &nbsp; RMB-drag: pan</div>
+</div>
+
+<div id="legend" class="panel hidden">
+  <div><span class="sw" style="background:#36d399"></span>Ship + flown trail</div>
+  <div><span class="sw" style="background:#22d3ee"></span>Planned corridor (now)</div>
+  <div><span class="sw" style="background:#e879f9"></span>Corridor (later in time)</div>
+  <div><span class="sw" style="background:#9a8d7d"></span>Asteroids (true positions)</div>
+  <div><span class="sw" style="background:#f43f5e"></span>Goal &nbsp;<span class="sw" style="background:#38bdf8"></span>Start</div>
+</div>
+
+<div id="explain" class="panel hidden">
+  <b>Why the corridor can cross a rock:</b> the planner is <b>time-indexed</b> —
+  the line is colored by <i>when</i> the ship will be at each point (cyan = soon,
+  magenta = later). It may pass through where a rock is <i>now</i>, because the
+  rock will have moved by the time the ship arrives. Scrub time and watch the
+  gap open. The corridor also redraws at every replan (~1 s), exactly as the
+  autopilot saw it.
+</div>
+
+<div id="bar" class="panel hidden">
+  <button id="play">▶ Play</button>
+  <select id="spd">
+    <option value="0.5">0.5×</option>
+    <option value="1" selected>1×</option>
+    <option value="2">2×</option>
+    <option value="4">4×</option>
+  </select>
+  <input type="range" id="scrub" min="0" max="1000" value="0">
+  <span id="time">t = 0.00 s</span>
+  <label><input type="checkbox" id="follow"> follow ship</label>
+  <span id="status"></span>
+  <button id="loadNew">Load…</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = id => document.getElementById(id);
+
+// ---------------------------------------------------------------- scene
+const renderer = new THREE.WebGLRenderer({ canvas: $('c'), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x06080f);
+scene.fog = new THREE.Fog(0x06080f, 350, 900);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 2000);
+camera.position.set(140, 110, 140);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.AmbientLight(0x8899bb, 0.7));
+const sun = new THREE.DirectionalLight(0xfff4e0, 2.2);
+sun.position.set(120, 200, 80);
+scene.add(sun);
+
+// starfield
+{
+  const n = 1500, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(700 + Math.random() * 200);
+    pos.set([v.x, Math.abs(v.y) * 0.9 + 5, v.z], i * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xbfc8e6, size: 1.6, sizeAttenuation: false })));
+}
+
+function onResize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', onResize); onResize();
+
+// ---------------------------------------------------------------- flight objects
+let rec = null, frames = [], paths = [], duration = 0;
+let t = 0, playing = false, lastWall = 0;
+const world = new THREE.Group();
+scene.add(world);
+let shipObj, trailLine, trailPts = [], corridorLine, asteroidMeshes = [];
+
+function rockGeometry(seedI) {
+  const g = new THREE.IcosahedronGeometry(1, 1);
+  const p = g.attributes.position;
+  let s = seedI * 37.21;
+  const rand = () => { s = Math.sin(s * 12.9898) * 43758.5453; return s - Math.floor(s); };
+  // displace each unique vertex deterministically -> craggy rock
+  const seen = new Map();
+  for (let i = 0; i < p.count; i++) {
+    const key = [p.getX(i).toFixed(4), p.getY(i).toFixed(4), p.getZ(i).toFixed(4)].join(',');
+    if (!seen.has(key)) seen.set(key, 0.78 + rand() * 0.45);
+    const k = seen.get(key);
+    p.setXYZ(i, p.getX(i) * k, p.getY(i) * k, p.getZ(i) * k);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+function buildWorld() {
+  world.clear(); asteroidMeshes = []; trailPts = [];
+  const sc = rec.scenario;
+  const bmin = new THREE.Vector3(...sc.bounds.min), bmax = new THREE.Vector3(...sc.bounds.max);
+
+  // bounds + floor grid
+  const box = new THREE.Box3(bmin, bmax);
+  const bh = new THREE.Box3Helper(box, 0x2e4a78); bh.material.transparent = true; bh.material.opacity = 0.55;
+  world.add(bh);
+  const grid = new THREE.GridHelper(bmax.x - bmin.x, 18, 0x24365c, 0x141d33);
+  grid.position.y = bmin.y + 0.01;
+  world.add(grid);
+
+  // start / goal
+  const mk = (p, color) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1.6, 24, 16),
+      new THREE.MeshBasicMaterial({ color }));
+    m.position.set(...p);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.18, 8, 40),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6 }));
+    ring.rotation.x = Math.PI / 2; m.add(ring);
+    world.add(m); return m;
+  };
+  mk(sc.start, 0x38bdf8);
+  mk(sc.goal, 0xf43f5e);
+
+  // asteroids -- craggy gray rocks sized by real radius
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x9a8d7d, flatShading: true, roughness: 0.95 });
+  sc.asteroids.forEach((a, i) => {
+    const m = new THREE.Mesh(rockGeometry(i + 1), rockMat);
+    m.scale.setScalar(a.radius);
+    m.userData.spin = new THREE.Vector3(Math.sin(i * 3.1), Math.cos(i * 1.7), Math.sin(i * 0.7)).multiplyScalar(0.3);
+    world.add(m); asteroidMeshes.push(m);
+  });
+
+  // ship -- body + nose + engine glow
+  shipObj = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.9, 2.6, 12),
+    new THREE.MeshStandardMaterial({ color: 0xd8dee9, metalness: 0.6, roughness: 0.35 }));
+  body.rotation.x = Math.PI / 2;
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.7, 1.3, 12),
+    new THREE.MeshStandardMaterial({ color: 0x36d399, emissive: 0x1d7a58, metalness: 0.4, roughness: 0.4 }));
+  nose.rotation.x = Math.PI / 2; nose.position.z = 1.95;
+  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0x7fd4ff, transparent: true, opacity: 0.85 }));
+  glow.position.z = -1.6;
+  shipObj.add(body, nose, glow);
+  shipObj.scale.setScalar(Math.max(1, sc.ship.radius));
+  world.add(shipObj);
+
+  // trail + corridor (rebuilt every frame)
+  trailLine = new THREE.Line(new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0x36d399, transparent: true, opacity: 0.9 }));
+  corridorLine = new THREE.Line(new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95 }));
+  world.add(trailLine, corridorLine);
+}
+
+// ---------------------------------------------------------------- playback
+function frameAt(time) {
+  // binary search the last frame with t <= time, lerp toward the next
+  let lo = 0, hi = frames.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; (frames[mid].t <= time) ? lo = mid : hi = mid - 1; }
+  const a = frames[lo], b = frames[Math.min(lo + 1, frames.length - 1)];
+  const k = (b.t > a.t) ? (time - a.t) / (b.t - a.t) : 0;
+  return { a, b, k: THREE.MathUtils.clamp(k, 0, 1) };
+}
+const lerp3 = (pa, pb, k, out) => out.set(
+  pa[0] + (pb[0] - pa[0]) * k, pa[1] + (pb[1] - pa[1]) * k, pa[2] + (pb[2] - pa[2]) * k);
+
+const cNear = new THREE.Color(0x22d3ee), cFar = new THREE.Color(0xe879f9);
+function applyTime(time) {
+  if (!frames.length) return;
+  const { a, b, k } = frameAt(time);
+
+  const sp = new THREE.Vector3(); lerp3(a.ship, b.ship, k, sp);
+  const prev = shipObj.position.clone();
+  shipObj.position.copy(sp);
+  const dir = sp.clone().sub(prev);
+  if (dir.lengthSq() > 1e-6) shipObj.lookAt(sp.clone().add(dir));
+
+  const tmp = new THREE.Vector3();
+  asteroidMeshes.forEach((m, i) => {
+    if (a.ast[i] && b.ast[i]) { lerp3(a.ast[i], b.ast[i], k, tmp); m.position.copy(tmp); }
+    m.rotation.x += m.userData.spin.x * 0.01; m.rotation.y += m.userData.spin.y * 0.01;
+  });
+
+  // flown trail: all recorded ship positions up to `time`
+  const pts = [];
+  for (const f of frames) { if (f.t > time) break; pts.push(new THREE.Vector3(...f.ship)); }
+  pts.push(sp.clone());
+  trailLine.geometry.dispose();
+  trailLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+
+  // corridor: latest replan snapshot at or before `time`, colored by ETA
+  let snap = paths[0];
+  for (const p of paths) { if (p.t <= time) snap = p; else break; }
+  if (snap && snap.pts.length > 1) {
+    const cpts = snap.pts.map(p => new THREE.Vector3(...p));
+    const g = new THREE.BufferGeometry().setFromPoints(cpts);
+    const cols = new Float32Array(cpts.length * 3);
+    const col = new THREE.Color();
+    for (let i = 0; i < cpts.length; i++) {
+      col.copy(cNear).lerp(cFar, i / Math.max(1, cpts.length - 1));
+      cols.set([col.r, col.g, col.b], i * 3);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+    corridorLine.geometry.dispose();
+    corridorLine.geometry = g;
+    corridorLine.visible = true;
+  } else corridorLine.visible = false;
+
+  if ($('follow').checked) controls.target.lerp(sp, 0.2);
+
+  const speed = a.speed + (b.speed - a.speed) * k;
+  $('time').textContent = `t = ${time.toFixed(2)} s · ${speed.toFixed(1)} m/s`;
+  $('scrub').value = Math.round(1000 * time / Math.max(0.001, duration));
+}
+
+function tick(wall) {
+  requestAnimationFrame(tick);
+  if (playing) {
+    const dt = Math.min(0.1, (wall - lastWall) / 1000) * parseFloat($('spd').value);
+    t = Math.min(duration, t + dt);
+    if (t >= duration) setPlaying(false);
+    applyTime(t);
+  }
+  lastWall = wall;
+  controls.update();
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(tick);
+
+function setPlaying(p) {
+  playing = p;
+  $('play').textContent = p ? '⏸ Pause' : '▶ Play';
+  if (p && t >= duration) t = 0;
+}
+
+// ---------------------------------------------------------------- load
+function loadRecording(json) {
+  rec = json;
+  frames = rec.frames || [];
+  paths = rec.paths || [];
+  duration = frames.length ? frames[frames.length - 1].t : 0;
+  buildWorld();
+
+  const r = rec.result || {};
+  const sc = rec.scenario;
+  $('meta').innerHTML =
+    `${sc.asteroids.length} asteroids · noise σ=${sc.sim.noise_sigma} m/s²` +
+    ` · chance-constrained: ${sc.uncertainty.enable ? '3σ ON' : 'off'}<br>` +
+    `replans: ${r.replans ?? '?'} · Δv: ${r.dv_used ?? '?'} m/s` +
+    ` · min clearance: ${r.min_clearance >= 0 ? r.min_clearance + ' m' : 'n/a'}`;
+  const ok = r.status === 'ARRIVED';
+  $('status').textContent = `${r.status ?? ''}${ok ? ' ✓' : ''} (${(r.time ?? 0).toFixed ? r.time.toFixed(1) : r.time} s)`;
+  $('status').style.color = ok ? '#36d399' : '#f43f5e';
+
+  controls.target.set(0, 10, 0);
+  for (const el of ['top', 'legend', 'explain', 'bar']) $(el).classList.remove('hidden');
+  $('drop').classList.add('hidden');
+  t = 0; applyTime(0); setPlaying(true);
+}
+
+function readFile(file) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    try { loadRecording(JSON.parse(fr.result)); }
+    catch (e) { alert('Not a valid flight recording: ' + e.message); }
+  };
+  fr.readAsText(file);
+}
+$('file').addEventListener('change', e => e.target.files[0] && readFile(e.target.files[0]));
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); e.dataTransfer.files[0] && readFile(e.dataTransfer.files[0]); });
+
+$('play').onclick = () => setPlaying(!playing);
+$('scrub').oninput = e => { setPlaying(false); t = duration * e.target.value / 1000; applyTime(t); };
+$('loadNew').onclick = () => $('file').click();
+
+// If served over http (not file://), try to auto-load a sibling recording.
+if (location.protocol.startsWith('http')) {
+  fetch('../last_flight.json').then(r => r.ok ? r.json() : null).then(j => j && loadRecording(j)).catch(() => {});
+}
+</script>
+</body>
+</html>

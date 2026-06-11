@@ -96,6 +96,16 @@ var _replan_timer := 0.0
 var _contact := {}
 
 # ============================================================ derived limits
+# ---------------------------------------------------------------- recording
+# Flight recorder (default OFF -> zero behavior/perf change). When on, the run
+# is captured as: scenario (schema v2) + timed frames (ship + every asteroid
+# position) + a corridor snapshot at every replan + the final result. The JSON
+# feeds tools/flight_viewer.html (Three.js) for scrub-through-time replay.
+var record := false
+var rec_dt := 0.1               # seconds between captured frames
+var recording := {}
+var _rec_timer := 0.0
+
 func a_max() -> float:
 	return ship_max_thrust / maxf(1.0, ship_mass)
 
@@ -124,12 +134,15 @@ func reset_run() -> void:
 	_rng.seed = seed_value
 	plan_path()
 	status = "NO_PATH" if path.is_empty() else "FLYING"
+	if record:
+		_rec_init()
 
 func step(dt: float) -> void:
 	if status != "FLYING":
 		return
 
 	time += dt
+	var did_replan := false
 
 	# Capture pre-step positions so collision/clearance can be measured over the
 	# swept motion of this step, not just its endpoints (no tunneling at speed).
@@ -146,12 +159,21 @@ func step(dt: float) -> void:
 		plan_path()
 		_replan_timer = 0.0
 		replans += 1
+		did_replan = true
 
 	_step_ship(dt)
 	_update_metrics(ship_prev, ast_prev)
 
 	if status == "FLYING" and time >= max_time:
 		status = "TIMEOUT"
+
+	if record:
+		if did_replan:
+			_rec_path()
+		_rec_timer += dt
+		if _rec_timer >= rec_dt or is_terminal():
+			_rec_frame()
+			_rec_timer = 0.0
 
 # ============================================================ asteroid motion
 func _integrate_asteroid(a: Dictionary, dt: float) -> void:
@@ -548,6 +570,56 @@ static func save_to_file(path: String, scenario: Dictionary) -> bool:
 	if f == null:
 		return false
 	f.store_string(JSON.stringify(scenario, "\t"))
+	f.close()
+	return true
+
+# ============================================================ flight recording
+func _rec_init() -> void:
+	recording = {
+		"version": 1,
+		"scenario": to_scenario(),
+		"frames": [],
+		"paths": [],
+	}
+	_rec_timer = 0.0
+	_rec_frame()
+	_rec_path()
+
+func _rec_frame() -> void:
+	var ap := []
+	for a in asteroids:
+		var p: Vector3 = a["pos"]
+		ap.append([snappedf(p.x, 0.01), snappedf(p.y, 0.01), snappedf(p.z, 0.01)])
+	recording["frames"].append({
+		"t": snappedf(time, 0.001),
+		"ship": [snappedf(ship_pos.x, 0.01), snappedf(ship_pos.y, 0.01), snappedf(ship_pos.z, 0.01)],
+		"speed": snappedf(ship_vel.length(), 0.01),
+		"ast": ap,
+	})
+
+func _rec_path() -> void:
+	var pts := []
+	for p in path:
+		pts.append([snappedf(p.x, 0.1), snappedf(p.y, 0.1), snappedf(p.z, 0.1)])
+	recording["paths"].append({"t": snappedf(time, 0.001), "pts": pts})
+
+# Result is stamped at save time so it is always the final state.
+func save_recording(file_path: String) -> bool:
+	if recording.is_empty():
+		return false
+	recording["result"] = {
+		"status": status,
+		"time": snappedf(time, 0.01),
+		"dv_used": snappedf(dv_used, 0.1),
+		"min_clearance": (-1.0 if min_clearance == INF else snappedf(min_clearance, 0.01)),
+		"collisions": collisions,
+		"replans": replans,
+		"degraded": degraded,
+	}
+	var f := FileAccess.open(file_path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(JSON.stringify(recording))
 	f.close()
 	return true
 

@@ -21,6 +21,8 @@ trajectory_log.csv
 # .translation/.import artifacts)
 autopilot_space_sim_3d_godot/eval_*
 autopilot_space_sim_3d_godot/*.translation
+autopilot_space_sim_3d_godot/last_flight.json
+autopilot_space_sim_3d_godot/flight_*.json
 
 # Godot
 autopilot_space_sim_3d_godot/.godot/

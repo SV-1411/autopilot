@@ -315,6 +315,7 @@ func _start_run() -> void:
 	for a in _asteroids:
 		_restore_asteroids.append({"pos": a.global_position, "vel": a.velocity})
 	_sim = _build_sim()
+	_sim.record = true   # every interactive flight is replayable in the web viewer
 	_sim.reset_run()
 
 func _stop_run() -> void:
@@ -345,6 +346,13 @@ func _physics_process(dt: float) -> void:
 	if _sim.is_terminal():
 		_running = false
 		_run_button.text = "Go"
+		if _sim.save_recording("res://last_flight.json"):
+			print("Flight recording saved: ", ProjectSettings.globalize_path("res://last_flight.json"))
+			_hint_label.text = (
+				"Flight recorded -> last_flight.json\n"
+				+ "Open tools/flight_viewer.html in a browser\n"
+				+ "and load it to replay this exact flight\n"
+				+ "with a time scrubber.")
 		_update_ui()
 
 # ============================================================ input
@@ -432,12 +440,15 @@ func _handle_click(event: InputEvent) -> void:
 	var hit := space.intersect_ray(query)
 
 	if shift_down:
-		_goal_pos = _hit_to_world(hit, ray_origin, ray_dir)
+		# Clamp: a click that misses the floor lands 90 m out along the camera
+		# ray, which can be far outside the world -> the planner clamps to the
+		# nearest grid edge and the corridor "runs off the screen".
+		_goal_pos = _clamp_to_bounds(_hit_to_world(hit, ray_origin, ray_dir))
 		_goal_marker.global_position = _goal_pos
 		_replan_preview()
 		return
 	if ctrl_down:
-		_start_pos = _hit_to_world(hit, ray_origin, ray_dir)
+		_start_pos = _clamp_to_bounds(_hit_to_world(hit, ray_origin, ray_dir))
 		_ship.global_position = _start_pos
 		_start_marker.global_position = _start_pos
 		_replan_preview()
