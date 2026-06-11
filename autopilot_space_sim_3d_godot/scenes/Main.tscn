@@ -102,13 +102,14 @@ text = "Metrics:\n- Path: n/a\n- ETA: n/a\n- Replans: 0\n- Planner: n/a"
 text = "LMB: select\nShift+LMB: set Goal\nCtrl+LMB: set Start"
 
 [node name="Inspector" type="PanelContainer" parent="UI"]
-anchors_preset = 0
-anchor_right = 0.0
-anchor_bottom = 0.0
-offset_left = 12.0
-offset_top = 375.0
-offset_right = 420.0
-offset_bottom = 645.0
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -312.0
+offset_top = 12.0
+offset_right = -12.0
+offset_bottom = 420.0
+grow_horizontal = 0
 
 [node name="InspectorVBox" type="VBoxContainer" parent="UI/Inspector"]
 

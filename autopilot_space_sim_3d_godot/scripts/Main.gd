@@ -96,10 +96,14 @@ func _ready() -> void:
 	_start_marker.global_position = _start_pos
 	_goal_marker.global_position = _goal_pos
 
-	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge up/down"
+	_hint_label.text = "LMB: select   Shift+LMB: Goal   Ctrl+LMB: Start\nB: random belt   C: clear   Q/E: depth\nAlt+drag: move   R/F: nudge up/down\nRMB drag: orbit cam   Wheel: zoom   MMB: pan"
 
+	_setup_environment()
 	_setup_path_debug()
-	_replan_preview()
+	_draw_bounds()
+	# Spawn a demo belt immediately so a fresh launch shows the autopilot's
+	# problem (and the preview corridor through it) instead of empty space.
+	_generate_belt(BELT_COUNT)
 	_update_ui()
 
 func _add_save_load_buttons() -> void:
@@ -139,6 +143,83 @@ func _setup_file_dialog() -> void:
 	_file_dialog.add_filter("*.json", "Scenario JSON")
 	_file_dialog.file_selected.connect(_on_file_selected)
 	_ui_layer.add_child(_file_dialog)
+
+# The scene file has no WorldEnvironment, so without this the viewport is a
+# black void with three emissive dots in it. Build a space-like environment:
+# dark-blue sky gradient, sky ambient light, glow (makes the emissive ship /
+# asteroids / path read clearly), and a simple starfield dome.
+func _setup_environment() -> void:
+	var sky_mat := ProceduralSkyMaterial.new()
+	sky_mat.sky_top_color = Color(0.015, 0.025, 0.07)
+	sky_mat.sky_horizon_color = Color(0.07, 0.09, 0.18)
+	sky_mat.ground_horizon_color = Color(0.07, 0.09, 0.18)
+	sky_mat.ground_bottom_color = Color(0.01, 0.01, 0.03)
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
+	var env := Environment.new()
+	env.background_mode = Environment.BG_SKY
+	env.sky = sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_energy = 2.5
+	env.glow_enabled = true
+	var we := WorldEnvironment.new()
+	we.environment = env
+	add_child(we)
+
+	# Brighten the floor enough to read as a ground plane against the sky.
+	var floor_mat := ($Floor as MeshInstance3D).material_override as StandardMaterial3D
+	if floor_mat != null:
+		floor_mat.albedo_color = Color(0.13, 0.16, 0.23)
+
+	# Starfield: a few hundred unshaded white dots on a distant upper dome.
+	var star_mesh := SphereMesh.new()
+	star_mesh.radius = 0.5
+	star_mesh.height = 1.0
+	star_mesh.radial_segments = 4
+	star_mesh.rings = 2
+	var star_mat := StandardMaterial3D.new()
+	star_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	star_mat.albedo_color = Color(0.85, 0.88, 1.0)
+	star_mesh.material = star_mat
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = star_mesh
+	mm.instance_count = 350
+	var srng := RandomNumberGenerator.new()
+	srng.seed = 7
+	for i in range(mm.instance_count):
+		var dir := Vector3(srng.randfn(), absf(srng.randfn()) * 0.8 + 0.05, srng.randfn()).normalized()
+		var s := srng.randf_range(0.4, 1.5)
+		mm.set_instance_transform(i, Transform3D(Basis().scaled(Vector3(s, s, s)), dir * 420.0))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	add_child(mmi)
+
+# Faint wireframe of the world bounds, so the playable volume is visible.
+func _draw_bounds() -> void:
+	var box := ImmediateMesh.new()
+	var inst := MeshInstance3D.new()
+	inst.mesh = box
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = Color(0.25, 0.55, 0.85, 0.25)
+	inst.material_override = m
+	add_child(inst)
+	var lo := WORLD_BOUNDS_MIN
+	var hi := WORLD_BOUNDS_MAX
+	var c := [
+		Vector3(lo.x, lo.y, lo.z), Vector3(hi.x, lo.y, lo.z),
+		Vector3(hi.x, lo.y, hi.z), Vector3(lo.x, lo.y, hi.z),
+		Vector3(lo.x, hi.y, lo.z), Vector3(hi.x, hi.y, lo.z),
+		Vector3(hi.x, hi.y, hi.z), Vector3(lo.x, hi.y, hi.z),
+	]
+	var edges := [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]
+	box.surface_begin(Mesh.PRIMITIVE_LINES)
+	for e in edges:
+		box.surface_add_vertex(c[e[0]])
+		box.surface_add_vertex(c[e[1]])
+	box.surface_end()
 
 func _setup_path_debug() -> void:
 	_path_line = ImmediateMesh.new()

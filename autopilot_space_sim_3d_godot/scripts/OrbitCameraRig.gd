@@ -23,6 +23,10 @@ func _ready() -> void:
 	_pivot = get_node(pivot_path) as Node3D
 	_camera = get_node(camera_path) as Camera3D
 	_distance = clampf(_camera.position.z * -1.0 if _camera.position.z < 0.0 else _distance, min_distance, max_distance)
+	# Orient the camera at the pivot immediately: until the first zoom/orbit the
+	# camera otherwise keeps its scene-file orientation, which faces AWAY from
+	# the world (black screen on launch).
+	_update_camera_distance()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
