@@ -187,6 +187,22 @@ Reference result (60 belts of 26 moving asteroids, seed 0, time-indexed
 planner): **100% success, 0 collisions, 0 false refusals** — the legacy union
 planner scores 93.3% with 6.7% NO_PATH on the identical belts.
 
+### Verification matrix sign-off (2026-06-11, `tools/run_matrix.ps1`, 0 failures)
+
+| Cell | Config | Success | Coll. | NO_PATH | Worst clear | Replan mean |
+|---|---|---|---|---|---|---|
+| union canary | legacy planner, 26 ast. | 96.7% | 0 | 3.3% | 0.22 m | 60.5 ms |
+| dense stress | time planner, 34 ast. | 100% | 0 | 0% | 2.59 m | 11.4 ms |
+| noise, det. margins | σ=0.5 m/s² drift | 100% | 0 | 0% | 0.78 m | 8.1 ms |
+| noise + 3σ shells | σ=0.5, chance-constr. | 98.3% | 0 | 1.7% | 1.03 m (mean 8.60) | 26.4 ms |
+| sparse ×100 | 18 ast., 100 runs | 99% | 0 | 1% | 2.18 m | 6.2 ms |
+
+vs. the original pre-rewrite 100-run baseline (92% success / 1 collision /
+7% NO_PATH): success +7 pts, collisions eliminated, refusals 7× fewer.
+Cells 3 vs 4 isolate the chance-constraint payoff on identical noisy belts:
+mean clearance 6.49 → 8.60 m for ~6% extra Δv. Zero degraded runs in every
+time-planner cell (280 flights); the union canary logged 1.
+
 ## Roadmap / ideas
 
 - [x] Scenario save/load (JSON, schema v2) for repeatable benchmarks.
